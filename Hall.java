@@ -22,6 +22,8 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import javafx.print.PrinterJob;
@@ -374,6 +376,10 @@ public class Hall {
         invoicesBtn.setStyle("-fx-background-color: #9c27b0; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 15px; -fx-padding: 10px 15px;");
         invoicesBtn.setOnAction(e -> showInvoicesSelectionDialog());
 
+        Button transferBtn = new Button("نقل / تحويل 🔄");
+        transferBtn.setStyle("-fx-background-color: #ff9800; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10px 15px;");
+        transferBtn.setOnAction(e -> showTransferDialog());
+
         Button confirmOnlyBtn = new Button("إرسال للمطبخ/الشيش 🚀");
         confirmOnlyBtn.setStyle("-fx-background-color: #f0ad4e; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10px 15px;");
         confirmOnlyBtn.setOnAction(e -> confirmOrderToKitchenAndShishaWithoutClientPrint());
@@ -390,17 +396,229 @@ public class Hall {
         });
 
         HBox bottomActions = new HBox(15);
-
         bottomActions.setAlignment(Pos.CENTER);
-
         bottomActions.setPadding(new Insets(10));
-
         bottomActions.setStyle("-fx-background-color: #ffffff; -fx-border-color: #e0e0e0; -fx-border-radius: 8px; -fx-background-radius: 8px;");
 
-        bottomActions.getChildren().addAll(totalLabel, confirmOnlyBtn, payAndPrintBtn, logoutBtn);
+        bottomActions.getChildren().addAll(totalLabel, transferBtn, invoicesBtn, confirmOnlyBtn, payAndPrintBtn, logoutBtn);
 
         root.getChildren().addAll(headerBox, mainLayout, bottomActions);
+    }
 
+    private void showTransferDialog() {
+        Stage dialog = new Stage();
+        dialog.setTitle("إدارة نقل وتحويل الطاولات والأصناف");
+        dialog.initModality(Modality.APPLICATION_MODAL);
+
+        VBox layout = new VBox(15);
+        layout.setPadding(new Insets(20));
+        layout.setAlignment(Pos.CENTER);
+
+        Label titleLbl = new Label("اختر نوع عملية النقل لطاولة: " + selectedTable);
+        titleLbl.setStyle("-fx-font-size: 16px; -fx-font-weight: bold;");
+
+        Button transferFullTableBtn = new Button("🚚 نقل الطاولة بالكامل إلى طاولة أخرى");
+        transferFullTableBtn.setStyle("-fx-background-color: #0288d1; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px; -fx-padding: 10px;");
+        transferFullTableBtn.setMaxWidth(Double.MAX_VALUE);
+        transferFullTableBtn.setOnAction(e -> {
+            dialog.close();
+            handleFullTableTransferUI();
+        });
+
+        Button transferItemBtn = new Button("☕ نقل صنف محدد من هذه الطاولة إلى طاولة أخرى");
+        transferItemBtn.setStyle("-fx-background-color: #7b1fa2; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px; -fx-padding: 10px;");
+        transferItemBtn.setMaxWidth(Double.MAX_VALUE);
+        transferItemBtn.setOnAction(e -> {
+            dialog.close();
+            handleItemTransferUI();
+        });
+
+        layout.getChildren().addAll(titleLbl, transferFullTableBtn, transferItemBtn);
+        dialog.setScene(new Scene(layout, 400, 220));
+        dialog.show();
+    }
+
+    private void handleFullTableTransferUI() {
+        TextInputDialog input = new TextInputDialog();
+        input.setTitle("نقل طاولة بالكامل");
+        input.setHeaderText("نقل جميع أصناف الطاولة (" + selectedTable + ") إلى طاولة جديدة");
+        input.setContentText("أدخل رقم الطاولة الهدف (مثال: 75):");
+
+        input.showAndWait().ifPresent(targetTable -> {
+            targetTable = targetTable.trim();
+            if (targetTable.isEmpty() || targetTable.equals(selectedTable)) {
+                return;
+            }
+
+            List<TableOrderItem> currentOrders = activeTableOrders.get(selectedTable);
+            if (currentOrders == null || currentOrders.isEmpty()) {
+                Alert alert = new Alert(Alert.AlertType.WARNING, "الطاولة الحالية فارغة ولا يوجد بها طلبات للنقل!", ButtonType.OK);
+                alert.showAndWait();
+                return;
+            }
+
+            String sourceTable = selectedTable; // الاحتفاظ برقم الطاولة القديمة
+
+            // 1. نقل جميع الأصناف للطاولة الهدف
+            List<TableOrderItem> targetOrders = activeTableOrders.computeIfAbsent(targetTable, k -> new ArrayList<>());
+            targetOrders.addAll(currentOrders);
+
+            // 2. نقل البيانات الفرعية
+            if (tableNotes.containsKey(sourceTable)) {
+                tableNotes.put(targetTable, tableNotes.remove(sourceTable));
+            }
+            if (tableEntryTimes.containsKey(sourceTable)) {
+                tableEntryTimes.put(targetTable, tableEntryTimes.remove(sourceTable));
+            }
+            if (specialTableCustomerNames.containsKey(sourceTable)) {
+                specialTableCustomerNames.put(targetTable, specialTableCustomerNames.remove(sourceTable));
+            }
+
+            // 3. مسح الطاولة المصدر تماماً من الذاكرة لتصبح خالية
+            activeTableOrders.remove(sourceTable);
+
+            // 4. مزامنة قاعدة البيانات (القديمة أصبحت 0 / والجديدة 1)
+            syncTableToDatabase(sourceTable);
+            syncTableToDatabase(targetTable);
+
+            // 5. الانتداب للطاولة الجديدة وتحديدها لتكون هي الصفراء، بينما القديمة ترجع خضراء
+            selectedTable = targetTable;
+            currentTableLabel.setText("الطاولة: " + selectedTable);
+            loadTableOrderToScreen(selectedTable);
+
+            // إعادة رسم الشبكة بالكامل لإظهار الطاولة القديمة بالأخضر والجديدة بالأحمر/الأصفر
+            populateTables(1, 199);
+            updateTablesStats();
+
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم نقل الطاولة " + sourceTable + " بالكامل إلى الطاولة " + targetTable + "\nوأصبحت الطاولة القديمة فارغة الآن!", ButtonType.OK);
+            alert.showAndWait();
+        });
+    }
+
+    private void handleItemTransferUI() {
+        List<TableOrderItem> currentOrders = activeTableOrders.get(selectedTable);
+
+        if (currentOrders == null || currentOrders.isEmpty()) {
+            Alert alert = new Alert(Alert.AlertType.WARNING, "الطاولة الحالية لا تحتوي على طلبات لنقلها!", ButtonType.OK);
+            alert.showAndWait();
+            return;
+        }
+
+        Map<String, List<TableOrderItem>> itemsGroupedByName = new LinkedHashMap<>();
+
+        for (TableOrderItem item : currentOrders) {
+            String itemName = item.rawLine != null ? item.rawLine.split("\\|")[0].trim() : "صنف غير معروف";
+            itemsGroupedByName.computeIfAbsent(itemName, k -> new ArrayList<>()).add(item);
+        }
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("نقل أصناف محددة");
+        dialog.setHeaderText("حدد الكمية المراد نقلها من كل صنف في الطاولة (" + selectedTable + ")");
+
+        VBox dialogContent = new VBox(12);
+        dialogContent.setPadding(new Insets(15));
+
+        Map<String, Spinner<Integer>> spinnersMap = new HashMap<>();
+
+        for (Map.Entry<String, List<TableOrderItem>> entry : itemsGroupedByName.entrySet()) {
+            String name = entry.getKey();
+            int maxQty = entry.getValue().size();
+
+            HBox row = new HBox(10);
+            row.setAlignment(Pos.CENTER_LEFT);
+
+            Label nameLabel = new Label(name + " (المتاح: " + maxQty + ")");
+            nameLabel.setPrefWidth(220);
+            nameLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 13px;");
+
+           
+            Spinner<Integer> qtySpinner = new Spinner<>(0, maxQty, 0);
+            qtySpinner.setEditable(true);
+            qtySpinner.setPrefWidth(90);
+
+            spinnersMap.put(name, qtySpinner);
+            row.getChildren().addAll(nameLabel, qtySpinner);
+            dialogContent.getChildren().add(row);
+        }
+
+        TextField targetTableField = new TextField();
+        targetTableField.setPromptText("مثال: 75");
+
+        HBox targetRow = new HBox(10);
+        targetRow.setAlignment(Pos.CENTER_LEFT);
+        targetRow.setPadding(new Insets(10, 0, 0, 0));
+        Label targetLabel = new Label("إلى الطاولة رقم:");
+        targetLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #d9534f; -fx-font-size: 14px;");
+        targetRow.getChildren().addAll(targetLabel, targetTableField);
+
+        dialogContent.getChildren().addAll(new Separator(), targetRow);
+        dialog.getDialogPane().setContent(dialogContent);
+
+        ButtonType transferBtnType = new ButtonType("نقل الآن 🔄", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(transferBtnType, ButtonType.CANCEL);
+
+        dialog.showAndWait().ifPresent(response -> {
+            if (response == transferBtnType) {
+                String targetTable = targetTableField.getText().trim();
+
+                if (targetTable.isEmpty() || targetTable.equals(selectedTable)) {
+                    Alert alert = new Alert(Alert.AlertType.ERROR, "يرجى إدخال رقم طاولة هدف صحيح ومختلف!", ButtonType.OK);
+                    alert.showAndWait();
+                    return;
+                }
+
+                List<TableOrderItem> targetOrders = activeTableOrders.computeIfAbsent(targetTable, k -> new ArrayList<>());
+                boolean anyTransferred = false;
+
+                for (Map.Entry<String, Spinner<Integer>> entry : spinnersMap.entrySet()) {
+                    String itemName = entry.getKey();
+                    Spinner<Integer> spinner = entry.getValue();
+
+                    spinner.increment(0);
+
+                    int qtyToMove = spinner.getValue();
+                    List<TableOrderItem> availableList = itemsGroupedByName.get(itemName);
+
+                    if (qtyToMove > 0 && availableList != null) {
+                        anyTransferred = true;
+
+                        for (int i = 0; i < qtyToMove && !availableList.isEmpty(); i++) {
+                            TableOrderItem itemToMove = availableList.remove(0);
+                            currentOrders.remove(itemToMove);
+                            targetOrders.add(itemToMove);
+                        }
+                    }
+                }
+
+                if (!anyTransferred) {
+                    Alert alert = new Alert(Alert.AlertType.WARNING, "لم تقم بتحديد أي كمية لنقلها!", ButtonType.OK);
+                    alert.showAndWait();
+                    return;
+                }
+
+                String sourceTable = selectedTable;
+
+                if (currentOrders.isEmpty()) {
+                    activeTableOrders.remove(sourceTable);
+                    tableNotes.remove(sourceTable);
+                    tableEntryTimes.remove(sourceTable);
+                    specialTableCustomerNames.remove(sourceTable);
+                }
+
+                syncTableToDatabase(sourceTable);
+                syncTableToDatabase(targetTable);
+
+               
+                loadTableOrderToScreen(selectedTable);
+
+               
+                populateTables(1, 199);
+                updateTablesStats();
+
+                Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم نقل العناصر المحددة بنجاح إلى الطاولة " + targetTable, ButtonType.OK);
+                alert.showAndWait();
+            }
+        });
     }
 
     private void handleDoubleClickRemove() {
@@ -867,7 +1085,7 @@ public class Hall {
         mainContainer.setAlignment(Pos.CENTER);
 
         if (title.contains("شيك الزبون")) {
-           
+            // --- شيك الزبون ينزل بالكامل بكل الكميات دون تغيير ---
             VBox receipt = new VBox(4);
             receipt.setPadding(new Insets(10, 15, 10, 15));
             receipt.setAlignment(Pos.TOP_CENTER);
@@ -1007,7 +1225,7 @@ public class Hall {
             mainContainer.getChildren().add(scrollPane);
 
         } else {
- 
+            // --- معاينة بون المطبخ أو الشيشة بالفرق فقط ---
             VBox paperReceipt = new VBox(8);
             paperReceipt.setPadding(new Insets(15));
             paperReceipt.setAlignment(Pos.TOP_CENTER);
@@ -1061,7 +1279,7 @@ public class Hall {
                     boolean isIgnored = itemLine.contains("[playstation]") || itemLine.contains("[service]");
 
                     if ((isShishaFilter && isShishaItem) || (!isShishaFilter && !isShishaItem && !isIgnored)) {
-                        int diffQty = item.getUnprintedQty(); 
+                        int diffQty = item.getUnprintedQty(); // حساب الفرق المعروض
                         if (diffQty > 0) {
                             String name = itemLine.split(" \\| ")[0].trim();
 
@@ -1193,12 +1411,15 @@ public class Hall {
         if (items != null) {
             for (TableOrderItem item : items) {
                 String itemLine = item.rawLine;
-                 
+
                 if (!itemLine.contains("[shisha]") && !itemLine.contains("[playstation]") && !itemLine.contains("[service]")) {
-                    int diffQty = item.getUnprintedQty(); 
+                    int diffQty = item.getUnprintedQty();
                     if (diffQty > 0) {
-                        String name = itemLine.split(" \\| ")[0].trim();
-                        sb.append(String.format("• %-25s  (عدد %d)\n", name, diffQty));
+
+                        String[] parts = itemLine.split("\\|");
+                        String name = parts[0].trim();
+
+                        sb.append(String.format("• %-25s  [%d ×]\n", name, diffQty));
                         hasItems = true;
                     }
                 }
@@ -1206,7 +1427,7 @@ public class Hall {
         }
 
         if (!hasItems) {
-            return null; 
+            return null;
         }
 
         sb.append("------------------------------------------------\n");
@@ -1235,10 +1456,12 @@ public class Hall {
             for (TableOrderItem item : items) {
                 String itemLine = item.rawLine;
                 if (itemLine.contains("[shisha]")) {
-                    int diffQty = item.getUnprintedQty(); // حساب الفرق فقط
+                    int diffQty = item.getUnprintedQty();
                     if (diffQty > 0) {
-                        String name = itemLine.split(" \\| ")[0].trim();
-                        sb.append(String.format("• %-25s  (عدد %d)\n", name, diffQty));
+                        String[] parts = itemLine.split("\\|");
+                        String name = parts[0].trim();
+
+                        sb.append(String.format("• %-25s  [%d ×]\n", name, diffQty));
                         hasItems = true;
                     }
                 }
@@ -1839,7 +2062,6 @@ public class Hall {
     private void confirmOrderToKitchenAndShishaWithoutClientPrint() {
         List<TableOrderItem> items = activeTableOrders.get(selectedTable);
 
-        // 1. توليد بون المطبخ والشيشة للجديد فقط
         String kitchenTicket = generateFullKitchenTicketText();
         String shishaTicket = generateFullShishaTicketText();
 
@@ -1849,12 +2071,10 @@ public class Hall {
             return;
         }
 
-        // 2. كود الطباعة المباشرة الخاص بك للطابعة يُوضع هنا (مثل printTextToPrinter(kitchenTicket) .. إلخ)
-        // 3. تحديث الـ sentQty لكل العناصر ليصبح المساوئ للكمية الحالية
         if (items != null) {
             for (TableOrderItem item : items) {
                 int currentTotalQty = TableOrderItem.extractQtyFromLine(item.rawLine);
-                item.sentQty = currentTotalQty; // تحديث المرسل
+                item.sentQty = currentTotalQty;
                 item.sentToKitchen = true;
             }
         }
@@ -1867,7 +2087,7 @@ public class Hall {
         syncTableToDatabase(selectedTable);
         populateTables(1, 199);
         syncTableToDatabase(selectedTable);
-        loadTableOrderToScreen(selectedTable); // إعادة تحميل القائمة لتحديث العرض
+        loadTableOrderToScreen(selectedTable);
     }
 
     private void sendTextToPrinter(String text) {
@@ -2054,7 +2274,6 @@ public class Hall {
             this(rawLine, false, 0);
         }
 
-        // دالة لحساب الفرق الجديد (الكمية التي لم تُطبع بعد)
         public int getUnprintedQty() {
             int currentTotalQty = extractQtyFromLine(this.rawLine);
             return Math.max(0, currentTotalQty - this.sentQty);
@@ -2062,13 +2281,25 @@ public class Hall {
 
         private static int extractQtyFromLine(String line) {
             try {
-                if (line != null && line.contains("x ")) {
-                    String[] parts = line.split("x ", 2);
-                    return Integer.parseInt(parts[0].trim());
+                if (line != null && line.contains("|")) {
+                    String[] parts = line.split("\\|");
+                    if (parts.length >= 2) {
+
+                        return Integer.parseInt(parts[1].trim());
+                    }
                 }
             } catch (Exception ignored) {
             }
             return 1;
+        }
+
+        @Override
+        public String toString() {
+            if (rawLine != null && !rawLine.trim().isEmpty()) {
+
+                return rawLine.split("\\|")[0].trim();
+            }
+            return "صنف بدون اسم";
         }
     }
 
@@ -2086,4 +2317,5 @@ public class Hall {
             this.time = time;
         }
     }
+
 }
