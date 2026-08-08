@@ -70,7 +70,7 @@ public class Hall {
     private Label dailyIncomeLabel;
     private Label detailedStatsLabel;
     private Label tableNoteDisplayLabel;
-
+private Label captainLabel;
     private String selectedTable = "1";
 
     private TilePane tablesGrid;
@@ -180,21 +180,17 @@ public class Hall {
         root.setAlignment(Pos.TOP_CENTER);
         root.setStyle("-fx-background-color:#f5f5f5;");
 
+        // ========================================================
+        // --- الهيدر (Header) المعدل ---
+        // ========================================================
         Label title = new Label("ZCAFE (زردة)");
         title.setStyle("-fx-font-size:22px; -fx-text-fill:#8B5E3C; -fx-font-weight: bold;");
 
         currentTableLabel = new Label("الطاولة: " + selectedTable);
         currentTableLabel.setStyle("-fx-font-size:20px; -fx-text-fill:#d9534f; -fx-font-weight: bold;");
 
-        tablesStatsLabel = new Label();
-        tablesStatsLabel.setStyle("-fx-font-size:15px; -fx-text-fill:#333333; -fx-font-weight: bold;");
-
-        dailyIncomeLabel = new Label("دخل الوردية: " + dailyTotalIncome + " ج");
-        dailyIncomeLabel.setStyle("-fx-font-size:18px; -fx-text-fill:#2e7d32; -fx-font-weight: bold;");
-
-        detailedStatsLabel = new Label();
-        detailedStatsLabel.setStyle("-fx-font-size:15px; -fx-text-fill:#1f6feb; -fx-font-weight: bold;");
-        updateTablesStats();
+        captainLabel = new Label(getCaptainForTable(selectedTable));
+        captainLabel.setStyle("-fx-font-size:18px; -fx-text-fill:#1f6feb; -fx-font-weight: bold;");
 
         HBox headerBox = new HBox(20);
         headerBox.setAlignment(Pos.CENTER_LEFT);
@@ -205,12 +201,13 @@ public class Hall {
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
         headerBox.getChildren().addAll(
-                title, new Separator(javafx.geometry.Orientation.VERTICAL),
-                currentTableLabel, new Separator(javafx.geometry.Orientation.VERTICAL),
-                tablesStatsLabel, new Separator(javafx.geometry.Orientation.VERTICAL),
-                detailedStatsLabel, spacer,
-                dailyIncomeLabel
+                title,
+                new Separator(javafx.geometry.Orientation.VERTICAL),
+                currentTableLabel,
+                spacer,
+                captainLabel
         );
+        // ========================================================
 
         Label tablesTitle = new Label("اختر الطاولة أو البلايستيشن أو الأقسام الخاصة");
         tablesTitle.setStyle("-fx-font-size: 16px; -fx-font-weight: bold;");
@@ -280,6 +277,40 @@ public class Hall {
         subCategoriesBox = new VBox(10);
         subCategoriesBox.setAlignment(Pos.CENTER);
 
+        // ========================================================
+        // --- شريط البحث عن الأصناف مع زر المسح (Clean Search Bar) ---
+        // ========================================================
+        TextField searchItemField = new TextField();
+        searchItemField.setPromptText("🔍 ابحث عن صنف بالشاي، القهوة، المانجو...");
+        searchItemField.setStyle(
+                "-fx-font-size: 14px; "
+                + "-fx-padding: 8px 12px; "
+                + "-fx-background-radius: 20px; "
+                + "-fx-border-radius: 20px; "
+                + "-fx-border-color: #2196F3; "
+                + "-fx-border-width: 1.5px; "
+                + "-fx-background-color: #ffffff;"
+        );
+        HBox.setHgrow(searchItemField, Priority.ALWAYS);
+
+        Button clearSearchBtn = new Button("❌");
+        clearSearchBtn.setStyle(
+                "-fx-background-color: #ff5252; "
+                + "-fx-text-fill: white; "
+                + "-fx-font-weight: bold; "
+                + "-fx-background-radius: 20px; "
+                + "-fx-cursor: hand;"
+        );
+        clearSearchBtn.setOnAction(e -> searchItemField.clear());
+
+        HBox searchContainer = new HBox(8);
+        searchContainer.setAlignment(Pos.CENTER);
+        searchContainer.setPadding(new Insets(5, 0, 5, 0));
+        searchContainer.getChildren().addAll(searchItemField, clearSearchBtn);
+
+        searchItemField.textProperty().addListener((obs, oldText, newText) -> filterItems(newText));
+        // ========================================================
+
         Button btnMainDrinks = new Button("مشاريب ☕");
         Button btnMainShisha = new Button("شيشة 💨");
         Button btnMainFood = new Button("أكل وحلو 🍔");
@@ -289,14 +320,6 @@ public class Hall {
         styleMainCategoryButton(btnMainShisha);
         styleMainCategoryButton(btnMainFood);
         styleMainCategoryButton(btnMainPS);
-
-        btnMainDrinks.setOnAction(e -> showDrinksSubCategories());
-        btnMainShisha.setOnAction(e -> {
-            subCategoriesBox.getChildren().clear();
-            loadItemsToGrid("shisha");
-        });
-        btnMainFood.setOnAction(e -> showFoodSubCategories());
-        btnMainPS.setOnAction(e -> showPlaystationManagementView());
 
         HBox mainCategoriesBox = new HBox(10);
         mainCategoriesBox.setAlignment(Pos.CENTER);
@@ -318,7 +341,15 @@ public class Hall {
         VBox centerPanel = new VBox(10);
         centerPanel.setAlignment(Pos.TOP_CENTER);
         HBox.setHgrow(centerPanel, Priority.ALWAYS);
-        centerPanel.getChildren().addAll(catHeaderLbl, mainCategoriesBox, subCategoriesBox, itemsHeaderLbl, itemsScroll);
+
+        centerPanel.getChildren().addAll(
+                catHeaderLbl,
+                mainCategoriesBox,
+                searchContainer,
+                subCategoriesBox,
+                itemsHeaderLbl,
+                itemsScroll
+        );
 
         orderList = new ListView<>();
         orderList.setStyle("-fx-font-family: 'Consolas', 'Courier New', monospace; -fx-font-size: 14px; -fx-font-weight: bold;");
@@ -405,6 +436,89 @@ public class Hall {
         root.getChildren().addAll(headerBox, mainLayout, bottomActions);
     }
 
+    private void searchItemsInDatabase(String query) {
+        itemsGrid.getChildren().clear();
+
+        // جلب الاسم والسعر والقسم الرئيسي لربطه بدالة إضافة الأوردر بشكل صحيح
+        String sql = "SELECT name, price, main_category FROM menu_items WHERE name LIKE ? AND is_active = 1 ORDER BY name ASC";
+
+        try (Connection conn = DBConnection.getConnection(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
+
+            pstmt.setString(1, "%" + query + "%");
+            ResultSet rs = pstmt.executeQuery();
+
+            while (rs.next()) {
+                String name = rs.getString("name");
+                double price = rs.getDouble("price");
+                String category = rs.getString("main_category");
+
+                // المعالجة الاحتياطية في حال كان القسم فارغاً في قاعدة البيانات
+                if (category == null || category.trim().isEmpty()) {
+                    category = "kitchen";
+                }
+
+                Button itemBtn = new Button(name + "\n" + price + " ج");
+                itemBtn.setPrefSize(110, 60);
+                itemBtn.setStyle("-fx-background-color: #2196F3; -fx-text-fill: white; -fx-font-weight: bold; -fx-text-alignment: center;");
+
+                // حفظ المتغيرات محلياً لتمريرها بسلام داخل الـ Lambda دون إيرور
+                String itemName = name;
+                String itemCategory = category;
+
+                // استدعاء الدالة بنفس المعاملات المطلوبين (الاسم، السعر، الكمية=1، القسم)
+                itemBtn.setOnAction(e -> addItemToOrder(itemName, price, 1, itemCategory));
+
+                itemsGrid.getChildren().add(itemBtn);
+            }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void filterItems(String query) {
+        if (query == null || query.trim().isEmpty()) {
+            showDrinksSubCategories();
+            return;
+        }
+
+        subCategoriesBox.getChildren().clear();
+        itemsGrid.getChildren().clear();
+
+        String sql = "SELECT name, price, main_category FROM menu_items WHERE name LIKE ? AND is_active = 1 ORDER BY name ASC";
+
+        try (Connection conn = DBConnection.getConnection(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
+
+            pstmt.setString(1, "%" + query.trim() + "%");
+            ResultSet rs = pstmt.executeQuery();
+
+            while (rs.next()) {
+                String name = rs.getString("name");
+                double price = rs.getDouble("price");
+                String mainCategory = rs.getString("main_category");
+
+                Button itemBtn = new Button(name + "\n" + price + " ج");
+                itemBtn.setPrefSize(110, 60);
+                itemBtn.setStyle("-fx-background-color: #2196F3; -fx-text-fill: white; -fx-font-weight: bold; -fx-text-alignment: center;");
+
+                String fullName = name;
+                if ("shisha".equalsIgnoreCase(mainCategory)) {
+                    fullName += " [shisha]";
+                } else if ("food".equalsIgnoreCase(mainCategory)) {
+                    fullName += " [kitchen]";
+                }
+
+                final String finalName = fullName;
+                itemBtn.setOnAction(e -> addItemToCurrentOrder(finalName, price));
+
+                itemsGrid.getChildren().add(itemBtn);
+            }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
     private void showTransferDialog() {
         Stage dialog = new Stage();
         dialog.setTitle("إدارة نقل وتحويل الطاولات والأصناف");
@@ -439,6 +553,34 @@ public class Hall {
     }
 
     private void handleFullTableTransferUI() {
+        List<TableOrderItem> currentOrders = activeTableOrders.get(selectedTable);
+
+        // 1. التحقق الأساسي من وجود الطلبات
+        if (currentOrders == null || currentOrders.isEmpty()) {
+            Alert alert = new Alert(Alert.AlertType.WARNING, "الطاولة الحالية فارغة ولا يوجد بها طلبات للنقل!", ButtonType.OK);
+            alert.showAndWait();
+            return;
+        }
+
+        // 2. التحقق من أن جميع الأصناف (والكميات المضافة حديثاً) تم إرسالها للمطبخ/الشيشة
+        boolean hasUnsentItems = false;
+        for (TableOrderItem item : currentOrders) {
+            int currentQty = TableOrderItem.extractQtyFromLine(item.rawLine);
+            // إذا كان الصنف غير مرسل أو تمت زيادة كميته ولم ترسل للمطبخ بعد
+            if (!item.sentToKitchen || item.sentQty < currentQty) {
+                hasUnsentItems = true;
+                break;
+            }
+        }
+
+        if (hasUnsentItems) {
+            Alert alert = new Alert(Alert.AlertType.ERROR,
+                    "عذراً! يوجد أصناف جديدة أو كميات مضافة لم تُرسل للمطبخ بعد.\nيرجى الضغط على زر (إرسال للمطبخ) أولاً قبل نقل الطاولة.",
+                    ButtonType.OK);
+            alert.showAndWait();
+            return;
+        }
+
         TextInputDialog input = new TextInputDialog();
         input.setTitle("نقل طاولة بالكامل");
         input.setHeaderText("نقل جميع أصناف الطاولة (" + selectedTable + ") إلى طاولة جديدة");
@@ -450,20 +592,12 @@ public class Hall {
                 return;
             }
 
-            List<TableOrderItem> currentOrders = activeTableOrders.get(selectedTable);
-            if (currentOrders == null || currentOrders.isEmpty()) {
-                Alert alert = new Alert(Alert.AlertType.WARNING, "الطاولة الحالية فارغة ولا يوجد بها طلبات للنقل!", ButtonType.OK);
-                alert.showAndWait();
-                return;
-            }
+            String sourceTable = selectedTable; // حفظ رقم الطاولة القديمة
 
-            String sourceTable = selectedTable; // الاحتفاظ برقم الطاولة القديمة
-
-            // 1. نقل جميع الأصناف للطاولة الهدف
+            // 3. نقل الأصناف والبيانات للجديدة
             List<TableOrderItem> targetOrders = activeTableOrders.computeIfAbsent(targetTable, k -> new ArrayList<>());
             targetOrders.addAll(currentOrders);
 
-            // 2. نقل البيانات الفرعية
             if (tableNotes.containsKey(sourceTable)) {
                 tableNotes.put(targetTable, tableNotes.remove(sourceTable));
             }
@@ -474,23 +608,28 @@ public class Hall {
                 specialTableCustomerNames.put(targetTable, specialTableCustomerNames.remove(sourceTable));
             }
 
-            // 3. مسح الطاولة المصدر تماماً من الذاكرة لتصبح خالية
+            // 4. تفريغ الطاولة المصدر وحذفها بالكامل من الذاكرة
             activeTableOrders.remove(sourceTable);
+            tableNotes.remove(sourceTable);
+            tableEntryTimes.remove(sourceTable);
+            specialTableCustomerNames.remove(sourceTable);
+            tableStates.put(sourceTable, 0); // إعادة تعيين لون القديمة للأخضر (فارغة)
+            tableStates.put(targetTable, 2); // ضبط لون الجديدة للحالة المرسلة للمطبخ
 
-            // 4. مزامنة قاعدة البيانات (القديمة أصبحت 0 / والجديدة 1)
+            // 5. مزامنة الطاولتين في قاعدة البيانات
             syncTableToDatabase(sourceTable);
             syncTableToDatabase(targetTable);
 
-            // 5. الانتداب للطاولة الجديدة وتحديدها لتكون هي الصفراء، بينما القديمة ترجع خضراء
+            // 6. نقل التحديد للطاولة الجديدة بدلاً من المصدر
             selectedTable = targetTable;
             currentTableLabel.setText("الطاولة: " + selectedTable);
-            loadTableOrderToScreen(selectedTable);
 
-            // إعادة رسم الشبكة بالكامل لإظهار الطاولة القديمة بالأخضر والجديدة بالأحمر/الأصفر
+            // 7. إعادة بناء الواجهة بالكامل لتحديث الألوان
             populateTables(1, 199);
+            loadTableOrderToScreen(selectedTable);
             updateTablesStats();
 
-            Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم نقل الطاولة " + sourceTable + " بالكامل إلى الطاولة " + targetTable + "\nوأصبحت الطاولة القديمة فارغة الآن!", ButtonType.OK);
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم نقل جميع أصناف الطاولة " + sourceTable + " إلى الطاولة " + targetTable + " بنجاح!\nوأصبحت الطاولة القديمة فارغة.", ButtonType.OK);
             alert.showAndWait();
         });
     }
@@ -504,35 +643,63 @@ public class Hall {
             return;
         }
 
-        Map<String, List<TableOrderItem>> itemsGroupedByName = new LinkedHashMap<>();
-
+        // 1. التحقق الفوري قبل فتح النافذة: هل توجد أي أصناف أو كميات لم تُرسل للمطبخ؟
+        boolean hasUnsentItems = false;
         for (TableOrderItem item : currentOrders) {
-            String itemName = item.rawLine != null ? item.rawLine.split("\\|")[0].trim() : "صنف غير معروف";
-            itemsGroupedByName.computeIfAbsent(itemName, k -> new ArrayList<>()).add(item);
+            int currentQty = TableOrderItem.extractQtyFromLine(item.rawLine);
+            if (!item.sentToKitchen || item.sentQty < currentQty) {
+                hasUnsentItems = true;
+                break;
+            }
         }
 
+        if (hasUnsentItems) {
+            Alert alert = new Alert(Alert.AlertType.ERROR,
+                    "عذراً! لا يمكن فتح نافذة نقل الأصناف لأن هناك طلبات لم تُرسل للمطبخ بعد.\nيرجى الضغط على زر (إرسال للمطبخ) أولاً.",
+                    ButtonType.OK);
+            alert.showAndWait();
+            return; // الخروج فوراً قبل إنشاء أو فتح نافذة التحديد
+        }
+
+        // 2. تجميع البيانات وحساب الكميات
+        Map<String, TableOrderItem> itemMap = new LinkedHashMap<>();
+        Map<String, Integer> itemQtyMap = new LinkedHashMap<>();
+
+        for (TableOrderItem item : currentOrders) {
+            String itemName = "صنف غير معروف";
+            int qty = TableOrderItem.extractQtyFromLine(item.rawLine);
+
+            if (item.rawLine != null && !item.rawLine.trim().isEmpty()) {
+                String[] parts = item.rawLine.split("\\|");
+                itemName = parts[0].trim();
+            }
+
+            itemMap.put(itemName, item);
+            itemQtyMap.put(itemName, itemQtyMap.getOrDefault(itemName, 0) + qty);
+        }
+
+        // 3. بناء النافذة فقط بعد التأكد من أن كل شيء مرسل للمطبخ
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("نقل أصناف محددة");
-        dialog.setHeaderText("حدد الكمية المراد نقلها من كل صنف في الطاولة (" + selectedTable + ")");
+        dialog.setHeaderText("حدد الكمية المطلوبة للنقل من الطاولة (" + selectedTable + ")");
 
         VBox dialogContent = new VBox(12);
         dialogContent.setPadding(new Insets(15));
 
         Map<String, Spinner<Integer>> spinnersMap = new HashMap<>();
 
-        for (Map.Entry<String, List<TableOrderItem>> entry : itemsGroupedByName.entrySet()) {
+        for (Map.Entry<String, Integer> entry : itemQtyMap.entrySet()) {
             String name = entry.getKey();
-            int maxQty = entry.getValue().size();
+            int totalAvailableQty = entry.getValue();
 
             HBox row = new HBox(10);
             row.setAlignment(Pos.CENTER_LEFT);
 
-            Label nameLabel = new Label(name + " (المتاح: " + maxQty + ")");
-            nameLabel.setPrefWidth(220);
+            Label nameLabel = new Label(name + " (المتاح: " + totalAvailableQty + ")");
+            nameLabel.setPrefWidth(240);
             nameLabel.setStyle("-fx-font-weight: bold; -fx-font-size: 13px;");
 
-           
-            Spinner<Integer> qtySpinner = new Spinner<>(0, maxQty, 0);
+            Spinner<Integer> qtySpinner = new Spinner<>(0, totalAvailableQty, 0);
             qtySpinner.setEditable(true);
             qtySpinner.setPrefWidth(90);
 
@@ -568,29 +735,79 @@ public class Hall {
                 }
 
                 List<TableOrderItem> targetOrders = activeTableOrders.computeIfAbsent(targetTable, k -> new ArrayList<>());
-                boolean anyTransferred = false;
+                boolean movedAny = false;
+                List<TableOrderItem> itemsToRemove = new ArrayList<>();
 
                 for (Map.Entry<String, Spinner<Integer>> entry : spinnersMap.entrySet()) {
                     String itemName = entry.getKey();
                     Spinner<Integer> spinner = entry.getValue();
 
-                    spinner.increment(0);
+                    int qtyToMove = 0;
+                    try {
+                        qtyToMove = Integer.parseInt(spinner.getEditor().getText().trim());
+                    } catch (Exception e) {
+                        qtyToMove = spinner.getValue();
+                    }
 
-                    int qtyToMove = spinner.getValue();
-                    List<TableOrderItem> availableList = itemsGroupedByName.get(itemName);
+                    int availableQty = itemQtyMap.getOrDefault(itemName, 0);
+                    if (qtyToMove <= 0) {
+                        continue;
+                    }
+                    if (qtyToMove > availableQty) {
+                        qtyToMove = availableQty;
+                    }
 
-                    if (qtyToMove > 0 && availableList != null) {
-                        anyTransferred = true;
+                    TableOrderItem originalItem = itemMap.get(itemName);
+                    if (originalItem == null) {
+                        continue;
+                    }
 
-                        for (int i = 0; i < qtyToMove && !availableList.isEmpty(); i++) {
-                            TableOrderItem itemToMove = availableList.remove(0);
-                            currentOrders.remove(itemToMove);
-                            targetOrders.add(itemToMove);
+                    movedAny = true;
+
+                    String raw = originalItem.rawLine != null ? originalItem.rawLine : "";
+                    String[] parts = raw.split("\\|");
+
+                    double singlePrice = 0.0;
+                    String tag = "";
+
+                    if (parts.length >= 3) {
+                        try {
+                            double totalPrice = Double.parseDouble(parts[2].replace("ج", "").replace("[kitchen]", "").replace("[shisha]", "").trim());
+                            singlePrice = totalPrice / availableQty;
+                        } catch (Exception ignored) {
+                        }
+
+                        if (raw.contains("[kitchen]")) {
+                            tag = " [kitchen]";
+                        } else if (raw.contains("[shisha]")) {
+                            tag = " [shisha]";
                         }
                     }
+
+                    int remainingQty = availableQty - qtyToMove;
+
+                    if (remainingQty > 0) {
+                        if (parts.length >= 3) {
+                            double newPrice = singlePrice * remainingQty;
+                            originalItem.rawLine = String.format("%s | %d | %.2f ج%s", itemName, remainingQty, newPrice, tag);
+                            originalItem.sentQty = remainingQty;
+                        }
+                    } else {
+                        itemsToRemove.add(originalItem);
+                    }
+
+                    double movedTotalPrice = singlePrice * qtyToMove;
+                    String newRawLine = String.format("%s | %d | %.2f ج%s", itemName, qtyToMove, movedTotalPrice, tag);
+
+                    TableOrderItem newItem = new TableOrderItem(newRawLine);
+                    newItem.sentToKitchen = true;
+                    newItem.sentQty = qtyToMove;
+                    targetOrders.add(newItem);
                 }
 
-                if (!anyTransferred) {
+                currentOrders.removeAll(itemsToRemove);
+
+                if (!movedAny) {
                     Alert alert = new Alert(Alert.AlertType.WARNING, "لم تقم بتحديد أي كمية لنقلها!", ButtonType.OK);
                     alert.showAndWait();
                     return;
@@ -603,19 +820,22 @@ public class Hall {
                     tableNotes.remove(sourceTable);
                     tableEntryTimes.remove(sourceTable);
                     specialTableCustomerNames.remove(sourceTable);
+                    tableStates.put(sourceTable, 0);
+
+                    selectedTable = targetTable;
+                    currentTableLabel.setText("الطاولة: " + selectedTable);
                 }
+
+                tableStates.put(targetTable, 2);
 
                 syncTableToDatabase(sourceTable);
                 syncTableToDatabase(targetTable);
 
-               
                 loadTableOrderToScreen(selectedTable);
-
-               
                 populateTables(1, 199);
                 updateTablesStats();
 
-                Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم نقل العناصر المحددة بنجاح إلى الطاولة " + targetTable, ButtonType.OK);
+                Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم نقل الأصناف بنجاح إلى الطاولة " + targetTable, ButtonType.OK);
                 alert.showAndWait();
             }
         });
@@ -713,7 +933,6 @@ public class Hall {
         btn.setStyle("-fx-background-color: " + colorHex + "; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px; -fx-background-radius: 6px;");
     }
 
-    // معاينة وطباعة أوردرات الأقسام الخاصة (سوق، إدارة، استاف، خصوص)
     private void showSpecialCategoryOrdersPreviewWindow(String categoryName) {
         Stage previewStage = new Stage();
         previewStage.setTitle("معاينة أوردرات قسم: " + categoryName);
@@ -738,12 +957,15 @@ public class Hall {
         reportBuilder.append("================================================\n\n");
 
         double totalCategoryAmount = 0;
-        int countItems = (categoryName.equals("سوق")) ? 8 : (categoryName.equals("إدارة")) ? 6 : (categoryName.equals("استاف")) ? 5 : 10;
+
+        // 👇 التعديل هنا: جعل السوق والإدارة والاستاف عنصر واحد فقط بدلاً من عدة عناصر 👇
+        int countItems = (categoryName.equals("سوق") || categoryName.equals("إدارة") || categoryName.equals("استاف")) ? 1 : 5;
 
         for (int i = 1; i <= countItems; i++) {
             String elementKey = categoryName + " " + i;
             String customerName = specialTableCustomerNames.getOrDefault(elementKey, "");
             List<TableOrderItem> orders = activeTableOrders.get(elementKey);
+
             if (orders == null || orders.isEmpty()) {
                 if (categoryName.equals("خصوص")) {
                     orders = persistentAglOrders.get(elementKey);
@@ -788,7 +1010,6 @@ public class Hall {
         previewStage.show();
     }
 
-    // معاينة وطباعة أوردرات صالة جوه (1-99) وصالة بره (99-199) من أول الشفت لآخره مع إجمالي الحسابات
     private void showCategoryOrdersPreviewWindow(String titleText, int startRange, int endRange) {
         Stage previewStage = new Stage();
         previewStage.setTitle("معاينة أوردرات " + titleText);
@@ -857,48 +1078,41 @@ public class Hall {
         Stage secStage = new Stage();
         secStage.setTitle("إدارة قسم " + categoryName);
 
-        VBox layout = new VBox(10);
-        layout.setPadding(new Insets(15));
+        VBox layout = new VBox(15);
+        layout.setPadding(new Insets(20));
         layout.setAlignment(Pos.CENTER);
 
-        Label header = new Label("اختر من قسم " + categoryName + " (من 5 إلى 10 عناصر):");
-        header.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; -fx-text-fill: #8B5E3C;");
+        Label header = new Label("قسم " + categoryName);
+        header.setStyle("-fx-font-size: 18px; -fx-font-weight: bold; -fx-text-fill: #8B5E3C;");
 
-        TilePane grid = new TilePane();
-        grid.setHgap(10);
-        grid.setVgap(10);
-        grid.setAlignment(Pos.CENTER);
-        grid.setPrefColumns(3);
+        // اسم الطاولة الواحدة للقسم (مثال: سوق 1)
+        final String itemName = categoryName + " 1";
 
-        for (int i = 1; i <= count; i++) {
-            final String itemName = categoryName + " " + i;
-            Button btn = new Button(itemName);
-            btn.setPrefSize(110, 50);
+        Button btn = new Button();
+        btn.setPrefSize(200, 60);
 
-            String customerName = specialTableCustomerNames.getOrDefault(itemName, "");
-            String btnText = customerName.isEmpty() ? itemName : itemName + "\n(" + customerName + ")";
-            btn.setText(btnText);
+        String customerName = specialTableCustomerNames.getOrDefault(itemName, "");
+        String btnText = customerName.isEmpty() ? itemName : itemName + "\n(" + customerName + ")";
+        btn.setText(btnText);
 
-            updateTableColorStyle(btn, itemName);
+        updateTableColorStyle(btn, itemName);
 
-            btn.setOnAction(e -> {
-                TextInputDialog nameDialog = new TextInputDialog(customerName);
-                nameDialog.setTitle("تسجيل اسم صاحب الأوردر");
-                nameDialog.setHeaderText("أدخل اسم الزبون للـ " + itemName + (categoryName.equals("خصوص") ? " (مفتوح بالآجل عدة أيام)" : ""));
-                nameDialog.setContentText("اسم الزبون:");
-                nameDialog.showAndWait().ifPresent(name -> {
-                    if (!name.trim().isEmpty()) {
-                        specialTableCustomerNames.put(itemName, name.trim());
-                    }
-                });
-
-                selectedTable = itemName;
-                currentTableLabel.setText("الطاولة: " + selectedTable + (specialTableCustomerNames.containsKey(itemName) ? " [" + specialTableCustomerNames.get(itemName) + "]" : ""));
-                loadTableOrderToScreen(selectedTable);
-                secStage.close();
+        btn.setOnAction(e -> {
+            TextInputDialog nameDialog = new TextInputDialog(customerName);
+            nameDialog.setTitle("تسجيل اسم صاحب الأوردر");
+            nameDialog.setHeaderText("أدخل اسم الزبون للـ " + itemName + (categoryName.equals("خصوص") ? " (مفتوح بالآجل عدة أيام)" : ""));
+            nameDialog.setContentText("اسم الزبون:");
+            nameDialog.showAndWait().ifPresent(name -> {
+                if (!name.trim().isEmpty()) {
+                    specialTableCustomerNames.put(itemName, name.trim());
+                }
             });
-            grid.getChildren().add(btn);
-        }
+
+            selectedTable = itemName;
+            currentTableLabel.setText("الطاولة: " + selectedTable + (specialTableCustomerNames.containsKey(itemName) ? " [" + specialTableCustomerNames.get(itemName) + "]" : ""));
+            loadTableOrderToScreen(selectedTable);
+            secStage.close();
+        });
 
         Button printAllDayLogBtn = new Button("🖨️ سجل طباعة كل أوردرات اليوم للقسم");
         printAllDayLogBtn.setStyle("-fx-background-color: #337ab7; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 10px;");
@@ -909,27 +1123,24 @@ public class Hall {
             allDayText.append("التاريخ: ").append(LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))).append("\n");
             allDayText.append("------------------------------------------------\n");
 
-            double catTotal = 0;
-            for (int i = 1; i <= count; i++) {
-                String tName = categoryName + " " + i;
-                String cName = specialTableCustomerNames.getOrDefault(tName, "بدون اسم");
-                List<TableOrderItem> tOrders = activeTableOrders.get(tName);
-                if (tOrders != null && !tOrders.isEmpty()) {
-                    allDayText.append("العنصر/الطاولة: ").append(tName).append(" | الزبون: ").append(cName).append("\n");
-                    for (TableOrderItem item : tOrders) {
-                        allDayText.append("  - ").append(item.rawLine).append("\n");
-                    }
-                    allDayText.append("------------------------------------------------\n");
+            String tName = categoryName + " 1";
+            String cName = specialTableCustomerNames.getOrDefault(tName, "بدون اسم");
+            List<TableOrderItem> tOrders = activeTableOrders.get(tName);
+            if (tOrders != null && !tOrders.isEmpty()) {
+                allDayText.append("العنصر/الطاولة: ").append(tName).append(" | الزبون: ").append(cName).append("\n");
+                for (TableOrderItem item : tOrders) {
+                    allDayText.append("  - ").append(item.rawLine).append("\n");
                 }
+                allDayText.append("------------------------------------------------\n");
             }
 
             sendTextToPrinter(allDayText.toString());
-            Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم طباعة سجل كل أوردرات القسم بنجاح!", ButtonType.OK);
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم طباعة سجل أوردرات القسم بنجاح!", ButtonType.OK);
             alert.showAndWait();
         });
 
-        layout.getChildren().addAll(header, grid, printAllDayLogBtn);
-        secStage.setScene(new Scene(layout, 400, 400));
+        layout.getChildren().addAll(header, btn, printAllDayLogBtn);
+        secStage.setScene(new Scene(layout, 350, 250));
         secStage.show();
     }
 
@@ -1688,132 +1899,27 @@ public class Hall {
 
     private void loadItemsToGrid(String category) {
         itemsGrid.getChildren().clear();
-        Object[][] itemsData = null;
 
-        switch (category) {
-            case "hot_drinks":
-                itemsData = new Object[][]{
-                    {"قهوة تركي", 17.0}, {"قهوة تركي _ دبل", 27.0}, {"قهوة محوج", 18.0}, {"قهوة محوج _ دبل", 27.0},
-                    {"قهوة حليب", 25.0}, {"قهوة نكهات", 28.0}, {"كاكاو", 28.0}, {"كاكاو _ سيدر", 30.0},
-                    {"هوت _ شوكليت", 30.0}, {"كابوتشينو", 30.0}, {"أسبرسو / سنجل", 28.0}, {"أسبرسو / دبل", 35.0},
-                    {"اسبرسو / ميكاتو", 40.0}, {"جنزبيل عسل", 20.0}, {"كوفي ميكس", 18.0}, {"قهوة غامق", 18.0},
-                    {"كافية لاتية", 27.0}, {"موكا كافية", 27.0}, {"أمريكان كوفي", 30.0}, {"نسكافية", 28.0},
-                    {"نسكافية _ بلاك", 20.0}, {"قهوة غامق_ دبل", 28.0}, {"أدمان", 30.0}, {"سكلانس", 25.0},
-                    {"ميكانو دبل", 45.0}, {"قرنفل مغلي", 20.0}, {"كوفي ميكس بن", 27.0}, {"كوفي ميكس حليب", 28.0},
-                    {"شاي_باكت", 12.0}, {"شاي كشري", 12.0}, {"شاي زردة", 13.0}, {"زردة عربي", 15.0},
-                    {"زردة كرك", 20.0}, {"زردة حليب", 18.0}, {"زردة نكهات", 15.0}, {"زردة نكهات حليب", 22.0},
-                    {"شاي حليب", 18.0}, {"شاي نكهات", 15.0}, {"شاي نكهات حليب", 22.0}, {"ينسون", 12.0},
-                    {"نعناع", 12.0}, {"كركديه", 12.0}, {"شاي اخضر", 14.0}, {"حلبه_ساده", 12.0},
-                    {"حلبه_حليب", 18.0}, {"قرفه_ساده", 17.0}, {"قرفه_حليب", 20.0}, {"جنزبيل_ساده", 17.0},
-                    {"جنزبيل_حليب", 20.0}, {"قرفه اوبشن", 25.0}, {"قرفه_جنزبيل", 17.0}, {"اعشاب", 22.0},
-                    {"اعشاب_ اوبشن", 27.0}, {"فيتامين C", 30.0}, {"هوت سيدر", 30.0}, {"زردة نكهات ميكس", 27.0},
-                    {"زردة نكهات حليب ميكس", 35.0}, {"شاي _ براد", 12.0}, {"سحلب ساده", 25.0}, {"سحلب / مكسرات", 30.0},
-                    {"سحلب / فواكه", 35.0}, {"سحلب / نوتيلا", 35.0}, {"سحلب_ اوبشن", 40.0}, {"ميكسو _ ساخن", 40.0},
-                    {"ليمون_ساخن", 17.0}, {"ليمون نعناع _ ساخن", 20.0}, {"شاي ابار", 12.0}, {"شوب حليب", 25.0}
-                };
-                break;
+        String targetCategory = "cocktail".equalsIgnoreCase(category) ? "cocktails" : category;
 
-            case "juices":
-                itemsData = new Object[][]{
-                    {"عصير مانجو", 35.0}, {"عصير موز", 30.0}, {"عصير فراولة", 30.0}, {"عصير جوافة", 30.0},
-                    {"عصير كيوى", 50.0}, {"عصير برتقال", 35.0}, {"عصير بطيخ", 35.0}, {"عصير مشمش", 35.0},
-                    {"عصير ليمون حليب", 27.0}, {"عصير خوخ", 35.0}, {"ليمون", 20.0}, {"ليمون _ منت", 25.0},
-                    {"عناب ساقع", 23.0}, {"عصير بلح", 30.0}, {"ليمون نعناع _ فريش", 25.0}, {"عصير اناناس", 45.0},
-                    {"عصير رومان", 35.0}, {"برقوق", 35.0}, {"سوبيا", 30.0}, {"عصير افوكادو", 60.0},
-                    {"عصير كريز", 50.0}, {"عصير كنتلوب", 30.0}, {"عصير تين شوكي", 35.0}, {"قشطه", 45.0},
-                    {"فراوله حليب", 35.0}, {"جوافه حليب", 35.0}, {"زبادي", 27.0}, {"زبادي عسل", 32.0},
-                    {"زبادي اناناس", 40.0}, {"زبادي فواكه", 40.0}, {"اجلاسيه", 35.0}, {"بطيخ لايف", 50.0},
-                    {"اناناس لايف", 65.0}, {"بلح مكسرات", 35.0}, {"ليمون نعناع حليب", 30.0}, {"عصير بندق", 60.0},
-                    {"عصير لوز", 60.0}, {"عصير كاجو", 60.0}, {"افوكادو مكس", 65.0}
-                };
-                break;
+        String sql = "SELECT name, price FROM menu_items WHERE sub_category = ? AND is_active = 1 ORDER BY name ASC";
 
-            case "soda":
-                itemsData = new Object[][]{
-                    {"بيبتي", 25.0}, {"سفن", 25.0}, {"فيروز", 27.0}, {"فيرندا برتقال", 25.0},
-                    {"فيرندا تفاح", 25.0}, {"جولد اناناس", 25.0}, {"جولد رومان", 25.0}, {"ماونتن ديو", 25.0},
-                    {"بيريل", 27.0}, {"امستيل", 25.0}, {"اسبيرو سباتس", 25.0}, {"ريد بول", 70.0},
-                    {"مياه صغيره", 8.0}, {"مياه كبيره", 13.0}, {"صن شاين", 35.0}, {"بلو اوشن", 35.0},
-                    {"صن سيت", 35.0}, {"موهيتو", 35.0}, {"جرين راي", 35.0}, {"شيري كولا", 35.0},
-                    {"تويست", 27.0}, {"استينج", 20.0}, {"دبل دير", 20.0}, {"فيوري", 27.0},
-                    {"V Cola", 25.0}, {"موهيتو باشون", 40.0}, {"ميرندا رمان", 25.0}, {"شويبس خوخ", 25.0}
-                };
-                break;
+        try (Connection conn = DBConnection.getConnection(); PreparedStatement pstmt = conn.prepareStatement(sql)) {
 
-            case "cocktail":
-            case "cocktails":
-                itemsData = new Object[][]{
-                    {"بوريو", 35.0}, {"اوريو", 40.0}, {"هوهوز", 40.0}, {"توينكز", 40.0},
-                    {"جيرسي", 40.0}, {"فرابيتشينو", 40.0}, {"ايس كوفي", 40.0}, {"كيوي اناناس", 50.0},
-                    {"مانجو خوخ", 45.0}, {"مانكي بيزنس", 45.0}, {"فخفخينا", 50.0}, {"موج البحر", 40.0},
-                    {"مانجو تين شوكي", 45.0}, {"لبن العصفور", 45.0}, {"مانجو كيوي", 45.0}, {"كوكتيل", 40.0},
-                    {"سوبيا فراوله", 45.0}, {"سوبيا مانجو", 45.0}, {"سوبيا بلح", 45.0}, {"سوبيا", 35.0},
-                    {"مالديف", 40.0}, {"بينا كولادا", 40.0}, {"بينتش زردة", 40.0}, {"بنانا سوبيه", 35.0},
-                    {"كوكتل زردة", 50.0}, {"ميلك شيك", 40.0}, {"ميكسو ساقع", 50.0}, {"بنانا كراش", 35.0},
-                    {"فخفخينا ايس كريم", 55.0}, {"سنيكرز", 45.0}, {"بطاطا", 35.0}, {"زبادي ميكس", 40.0},
-                    {"فياجرا", 50.0}, {"وايت نينجا", 40.0}, {"ميلك شعرية", 40.0}, {"ميلك كورن فليكس", 45.0},
-                    {"ايس موكا", 40.0}, {"ميلك بستاكيو", 50.0}, {"ميلك تشيك ميكس", 50.0}, {"جوافة بوريو", 45.0}
-                };
-                break;
+            pstmt.setString(1, targetCategory);
+            ResultSet rs = pstmt.executeQuery();
 
-            case "sweets":
-                itemsData = new Object[][]{
-                    {"أم علي ايس كريم", 40.0}, {"وافل نوتيلا اوريو", 50.0}, {"فروت سلاط ايس كريم", 60.0},
-                    {"قشطوطة زردة", 40.0}, {"ايس كريم 2 بولة", 25.0}, {"أم علي لوتس", 45.0},
-                    {"سلاطة فواكة", 30.0}, {"كيك نوتيلا", 35.0}
-                };
-                break;
-
-            case "munchies":
-                itemsData = new Object[][]{
-                    {"اندومى فرن _ اوبشن / دبل", 35.0}
-                };
-                break;
-
-            case "ss":
-                itemsData = new Object[][]{
-                    {"شاي_باكت_س", 7.0}, {"قهوة _ س", 12.0}, {"زردة _ س", 9.0}, {"نسكافيه _ س", 20.0},
-                    {"قهوة حليب _ سوق", 20.0}, {"زردة عربي _ س", 11.0}, {"قهوه محوج _ س", 14.0}, {"اضافه 5", 5.0},
-                    {"اضافه 4", 4.0}, {"نسكافيه _ بلاك _ س", 15.0}, {"شاي كشري سوق", 7.0}, {"كوفي ميكس سوق", 12.0},
-                    {"براد سوق", 8.0}, {"قهوه غامق سوق", 12.0}, {"اضافة 1", 1.0}, {"حلبة عادة سوق", 10.0},
-                    {"نعناع سوق", 10.0}, {"ينسون سوق", 10.0}, {"شاي اخضر سوق", 10.0}, {"كركديه سوق", 10.0},
-                    {"اضافة 3", 3.0}, {"اضافة 7", 7.0}, {"اضافه 10", 10.0}, {"سيرفس 20", 20.0},
-                    {"سيرفس 30", 30.0}, {"سيرفس 40", 40.0}, {"سيرفس 50", 50.0}, {"سيرفيس 100", 100.0}
-                };
-                break;
-
-            case "smoothie":
-                itemsData = new Object[][]{
-                    {"سموزي مانجو", 40.0}, {"سموزي فراولة", 40.0}, {"سموزي ليمون نعناع", 40.0},
-                    {"سموزي خوح", 40.0}, {"سموزي بطيخ", 40.0}, {"سموزي اناناس", 40.0}, {"سموزي كيوي", 45.0}
-                };
-                break;
-
-            case "shisha":
-                itemsData = new Object[][]{
-                    {"شيشة قص", 10.0}, {"شيشة سلوم", 9.0}, {"شيشة سلوم العرب", 10.0}, {"شيشة فاخر", 40.0},
-                    {"شيشة فاخر _ ايس", 45.0}, {"شيشة فاخر _ ميكس", 45.0}, {"شيشة فاخر _ ميكس _ ايس", 47.0},
-                    {"شيشة فاخر زردة", 50.0}, {"شيشة فواكة", 30.0}, {"شيشة فواكة _ ميكس", 35.0},
-                    {"شيشة فواكة _ ميكس / ايس", 40.0}, {"ثلج", 3.0}, {"شيشة مغربي", 25.0},
-                    {"شيشة مغربي ميكس زردة", 30.0}, {"شيشة مغربي زردة ايس", 33.0}, {"اضافه 3", 3.0},
-                    {"اضافه 5", 5.0}, {"لي زجاج", 20.0}, {"لي طبي", 12.0}
-                };
-                break;
-        }
-
-        if (itemsData != null) {
-            for (Object[] item : itemsData) {
-                String name = (String) item[0];
-                double price = (double) item[1];
+            while (rs.next()) {
+                String name = rs.getString("name");
+                double price = rs.getDouble("price");
 
                 Button itemBtn = new Button(name + "\n" + price + " ج");
                 itemBtn.setPrefSize(120, 50);
                 itemBtn.setStyle("-fx-background-color: #ffffff; -fx-border-color: #cccccc; -fx-font-weight: bold; -fx-font-size: 11px; -fx-text-alignment: center;");
 
-                String itemType = category.equals("shisha") ? "shisha" : "kitchen";
+                String itemType = "shisha".equalsIgnoreCase(targetCategory) ? "shisha" : "kitchen";
 
                 itemBtn.setOnAction(e -> {
-
                     if (shouldShowComments(name)) {
                         openItemCommentDialog(name, price, itemType);
                     } else {
@@ -1823,17 +1929,25 @@ public class Hall {
 
                 itemsGrid.getChildren().add(itemBtn);
             }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
         }
     }
 
-    private boolean shouldShowComments(String itemName) {
+   private boolean shouldShowComments(String itemName) {
+        // استثناء القص والسلوم من إظهار أي كومنتات (ترجع false مباشرة)
+        if (itemName.contains("قص") || itemName.contains("سلوم")) {
+            return false;
+        }
+
         return itemName.contains("قهوة") || itemName.contains("قهوه")
                 || itemName.contains("شاي") || itemName.contains("نسكافية")
                 || itemName.contains("نسكافيه") || itemName.contains("زردة")
                 || itemName.contains("سحلب") || itemName.contains("اندومى")
                 || itemName.contains("شيشة") || itemName.contains("شيشه")
-                || itemName.contains("قص") || itemName.contains("سلوم")
-                || itemName.contains("فاخر") || itemName.contains("مغربي");
+                || itemName.contains("فاخر") || itemName.contains("مغربي")
+                || itemName.contains("فواكه") || itemName.contains("ميكس");
     }
 
     private void openItemCommentDialog(String name, double price, String itemType) {
@@ -1851,19 +1965,21 @@ public class Hall {
         layout.setAlignment(Pos.CENTER);
         layout.setStyle("-fx-background-color: #ffffff;");
 
-        Label title = new Label("اختر طريقة التحضير لـ (" + name + "):");
+        Label title = new Label("اختر الإضافة أو النكهة لـ (" + name + "):");
         title.setStyle("-fx-font-size: 14px; -fx-font-weight: bold; -fx-text-fill: #333;");
 
         TilePane commentsGrid = new TilePane();
         commentsGrid.setHgap(8);
         commentsGrid.setVgap(8);
         commentsGrid.setAlignment(Pos.CENTER);
-        commentsGrid.setPrefColumns(3);
+        // تم زيادة عدد الأعمدة ليناسب عرض نكهات الشيشة المتعددة
+        commentsGrid.setPrefColumns(4); 
 
         List<String> options = new ArrayList<>();
 
-        if (itemType.equals("shisha") || name.contains("شيشة") || name.contains("شيشه") || name.contains("سلوم") || name.contains("قص") || name.contains("فاخر")) {
-            options.addAll(Arrays.asList("لي طبي", "لي زجاج", "حجر زياده", "حجر خفيف", "حجر تقيل", "ثلج", "بدون ثلج", "ايس"));
+        // تعديل خيارات الشيشة لتصبح نكهات الفواكه والميكسات
+        if (itemType.equals("shisha") || name.contains("شيشة") || name.contains("شيشه") || name.contains("فاخر") || name.contains("فواكه") || name.contains("ميكس")) {
+            options.addAll(Arrays.asList("مانجا", "بطيخ", "كيوي", "برقوق", "عنب", "تفاح", "خوخ", "نعناع", "ميكس"));
         } else if (name.contains("قهو") || name.contains("قهوة")) {
             options.addAll(Arrays.asList("مانو", "سكتو", "زيادة", "مظبوط", "على الريحة", "دوبل", "فرنساوي", "سادة"));
         } else if (name.contains("شاي") || name.contains("زردة")) {
@@ -1916,14 +2032,15 @@ public class Hall {
         customBox.getChildren().addAll(customInput, addCustomBtn);
 
         layout.getChildren().addAll(title, commentsGrid, normalBtn, new Separator(), customBox);
-        Scene scene = new Scene(layout, 340, 340);
+        // تم تكبير النافذة قليلاً لتستوعب الفواكه بشكل مريح
+        Scene scene = new Scene(layout, 420, 380); 
 
         dialog.setOnShown(e -> customInput.requestFocus());
 
         dialog.setScene(scene);
         dialog.showAndWait();
     }
-
+    
     private void addItemToOrder(String name, double price, int qty, String category) {
         if (!tableEntryTimes.containsKey(selectedTable)) {
             tableEntryTimes.put(selectedTable, LocalDateTime.now().format(DateTimeFormatter.ofPattern("hh:mm a")));
@@ -2032,7 +2149,19 @@ public class Hall {
         totalLabel.setText(String.format("الإجمالي: %.2f جنيه", total));
     }
 
-    private void loadTableOrderToScreen(String tableName) {
+  private void loadTableOrderToScreen(String tableName) {
+        // 1. تحديث اسم الطاولة المختارة
+        this.selectedTable = tableName;
+        if (currentTableLabel != null) {
+            currentTableLabel.setText("الطاولة: " + selectedTable);
+        }
+
+        // 2. تحديث اسم الكابتن المسند للطاولة الحالية في الهيدر
+        if (captainLabel != null) {
+            captainLabel.setText(getCaptainForTable(selectedTable));
+        }
+
+        // 3. تفريغ القائمة وإعادة تحميل أصناف الطاولة
         orderList.getItems().clear();
         List<TableOrderItem> savedItems = activeTableOrders.getOrDefault(tableName, new ArrayList<>());
         if (savedItems.isEmpty() && persistentAglOrders.containsKey(tableName)) {
@@ -2042,8 +2171,14 @@ public class Hall {
         for (TableOrderItem item : savedItems) {
             orderList.getItems().add(item.rawLine);
         }
+
+        // 4. عرض ملاحظات الطاولة واسم الزبون إن وجد
         String custInfo = specialTableCustomerNames.containsKey(tableName) ? " | الزبون: " + specialTableCustomerNames.get(tableName) : "";
-        tableNoteDisplayLabel.setText("ملاحظة الطاولة: " + tableNotes.getOrDefault(tableName, "لا يوجد") + custInfo);
+        if (tableNoteDisplayLabel != null) {
+            tableNoteDisplayLabel.setText("ملاحظة الطاولة: " + tableNotes.getOrDefault(tableName, "لا يوجد") + custInfo);
+        }
+
+        // 5. إعادة حساب الإجمالي
         calculateTotal();
     }
 
@@ -2217,6 +2352,28 @@ public class Hall {
 
     public static double getDailyPlaystationIncome() {
         return dailyPlaystationIncome;
+    }
+
+    private void addItemToCurrentOrder(String itemName, double price) {
+        // تحديد القسم افتراضياً كـ kitchen أو استخراج القسم إذا كان معلماً في الاسم
+        String category = "kitchen";
+
+        if (itemName.contains("[shisha]")) {
+            category = "shisha";
+            itemName = itemName.replace("[shisha]", "").trim();
+        } else if (itemName.contains("[playstation]")) {
+            category = "playstation";
+            itemName = itemName.replace("[playstation]", "").trim();
+        } else if (itemName.contains("[service]")) {
+            category = "service";
+            itemName = itemName.replace("[service]", "").trim();
+        } else if (itemName.contains("[kitchen]")) {
+            category = "kitchen";
+            itemName = itemName.replace("[kitchen]", "").trim();
+        }
+
+        // إرسال البيانات لدالة الإضافة الأصلية (الاسم، السعر، الكمية = 1، القسم)
+        addItemToOrder(itemName, price, 1, category);
     }
 
     private static class PlaystationDevice {
