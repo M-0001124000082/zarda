@@ -33,6 +33,24 @@ import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
 import javafx.scene.input.KeyEvent;
 import javafx.stage.Modality;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Random;
+import java.util.Properties;
+import java.util.Random;
+import jakarta.mail.Authenticator;
+import jakarta.mail.Message;
+import jakarta.mail.PasswordAuthentication;
+import jakarta.mail.Session;
+import jakarta.mail.Transport;
+import jakarta.mail.internet.InternetAddress;
+import jakarta.mail.internet.MimeMessage;
+import javafx.application.Platform;
+import javafx.scene.control.Alert;
+import javafx.scene.control.ButtonType;
+import javafx.scene.control.TextInputDialog;
 
 public class Hall {
 
@@ -70,7 +88,7 @@ public class Hall {
     private Label dailyIncomeLabel;
     private Label detailedStatsLabel;
     private Label tableNoteDisplayLabel;
-private Label captainLabel;
+    private Label captainLabel;
     private String selectedTable = "1";
 
     private TilePane tablesGrid;
@@ -841,44 +859,96 @@ private Label captainLabel;
         });
     }
 
-    private void handleDoubleClickRemove() {
-        int selectedIndex = orderList.getSelectionModel().getSelectedIndex();
-        if (selectedIndex < 0) {
-            return;
-        }
+   private String sendEmailOTP(String recipientEmail) {
+    int randomCode = 1000 + new Random().nextInt(9000);
+    String otpCode = String.valueOf(randomCode);
 
-        List<TableOrderItem> items = activeTableOrders.get(selectedTable);
-        if (items == null || selectedIndex >= items.size()) {
-            return;
-        }
+    final String senderEmail = "mh8302313@gmail.com";
+    // إزالة المسافات من كلمة المرور لضمان القبول
+    final String appPassword = "ofvpemmibkctwrxa";
 
-        TableOrderItem itemToModify = items.get(selectedIndex);
+    new Thread(() -> {
+        try {
+            Properties props = new Properties();
+            props.put("mail.smtp.auth", "true");
+            props.put("mail.smtp.starttls.enable", "true");
+            props.put("mail.smtp.host", "smtp.gmail.com");
+            props.put("mail.smtp.port", "587");
+            props.put("mail.smtp.ssl.protocols", "TLSv1.2");
+            props.put("mail.smtp.ssl.trust", "smtp.gmail.com");
 
-        if (itemToModify.sentToKitchen) {
-            TextInputDialog passDialog = new TextInputDialog();
-            passDialog.setTitle("تأكيد الإلغاء");
-            passDialog.setHeaderText("هذا الطلب تم إرساله للمطبخ بالفعل!");
-            passDialog.setContentText("أدخل كلمة السر لإلغاء/تقليل الصنف:");
-
-            var result = passDialog.showAndWait();
-            if (result.isPresent()) {
-                String enteredPass = result.get();
-
-                if (!"1234".equals(enteredPass)) {
-                    Alert alert = new Alert(Alert.AlertType.ERROR, "كلمة السر غير صحيحة! لا يمكن إلغاء الطلب.", ButtonType.OK);
-                    alert.showAndWait();
-                    return;
+            Session session = Session.getInstance(props, new Authenticator() {
+                @Override
+                protected PasswordAuthentication getPasswordAuthentication() {
+                    return new PasswordAuthentication(senderEmail, appPassword);
                 }
-            } else {
-                return;
-            }
-        }
+            });
 
-        items.remove(selectedIndex);
-        syncTableToDatabase(selectedTable);
-        loadTableOrderToScreen(selectedTable);
+            Message message = new MimeMessage(session);
+            message.setFrom(new InternetAddress(senderEmail, "Zarda CAFE System"));
+            message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(recipientEmail));
+            message.setSubject("رمز إلغاء طلب - ZCAFE");
+            message.setText("كود التأكيد لإلغاء الصنف بعد إرساله للمطبخ هو: " + otpCode);
+
+            Transport.send(message);
+            System.out.println("تم إرسال كود التأكيد بنجاح إلى: " + recipientEmail);
+
+        } catch (Exception e) {
+            System.err.println("فشل إرسال الإيميل: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }).start();
+
+    return otpCode;
+}
+
+// ========================================================
+// 2. ميثود الحذف والإلغاء مع ضبط توافقية JavaFX Thread
+// ========================================================
+private void handleDoubleClickRemove() {
+    int selectedIndex = orderList.getSelectionModel().getSelectedIndex();
+    if (selectedIndex < 0) {
+        return;
     }
 
+    List<TableOrderItem> items = activeTableOrders.get(selectedTable);
+    if (items == null || selectedIndex >= items.size()) {
+        return;
+    }
+
+    TableOrderItem itemToModify = items.get(selectedIndex);
+
+    // إذا كان الطلب قد أُرسل للمطبخ يتم توليد كود وإرساله للبريد
+    if (itemToModify.sentToKitchen) {
+        String targetEmail = "cyber1system@gmail.com";
+
+        // إرسال الكود للبريد الشخصي المستلم
+        String generatedOTP = sendEmailOTP(targetEmail);
+
+        TextInputDialog passDialog = new TextInputDialog();
+        passDialog.setTitle("تأكيد الإلغاء (Email OTP)");
+        passDialog.setHeaderText("هذا الطلب تم إرساله للمطبخ بالفعل!\nجاري إرسال كود التأكيد إلى إيميلك: " + targetEmail);
+        passDialog.setContentText("أدخل كود التحقق المكون من 4 أرقام:");
+
+        var result = passDialog.showAndWait();
+        if (result.isPresent()) {
+            String enteredPass = result.get().trim();
+
+            if (!generatedOTP.equals(enteredPass)) {
+                Alert alert = new Alert(Alert.AlertType.ERROR, "كود التحقق غير صحيح! لا يمكن إلغاء الطلب.", ButtonType.OK);
+                alert.showAndWait();
+                return;
+            }
+        } else {
+            return;
+        }
+    }
+
+    // الحذف المباشر (للطبات قبل المطبخ أو بعد إدخال الكود الصحيح)
+    items.remove(selectedIndex);
+    syncTableToDatabase(selectedTable);
+    loadTableOrderToScreen(selectedTable);
+}
     // نافذة اختيار الفواتير والأقسام الجديدة للـ معاينة والطباعة (سوق، إدارة، صالة جوه 1-99، صالة بره 99-199، آجل، استاف)
     private void showInvoicesSelectionDialog() {
         Stage invStage = new Stage();
@@ -1935,7 +2005,7 @@ private Label captainLabel;
         }
     }
 
-   private boolean shouldShowComments(String itemName) {
+    private boolean shouldShowComments(String itemName) {
         // استثناء القص والسلوم من إظهار أي كومنتات (ترجع false مباشرة)
         if (itemName.contains("قص") || itemName.contains("سلوم")) {
             return false;
@@ -1973,7 +2043,7 @@ private Label captainLabel;
         commentsGrid.setVgap(8);
         commentsGrid.setAlignment(Pos.CENTER);
         // تم زيادة عدد الأعمدة ليناسب عرض نكهات الشيشة المتعددة
-        commentsGrid.setPrefColumns(4); 
+        commentsGrid.setPrefColumns(4);
 
         List<String> options = new ArrayList<>();
 
@@ -2033,14 +2103,14 @@ private Label captainLabel;
 
         layout.getChildren().addAll(title, commentsGrid, normalBtn, new Separator(), customBox);
         // تم تكبير النافذة قليلاً لتستوعب الفواكه بشكل مريح
-        Scene scene = new Scene(layout, 420, 380); 
+        Scene scene = new Scene(layout, 420, 380);
 
         dialog.setOnShown(e -> customInput.requestFocus());
 
         dialog.setScene(scene);
         dialog.showAndWait();
     }
-    
+
     private void addItemToOrder(String name, double price, int qty, String category) {
         if (!tableEntryTimes.containsKey(selectedTable)) {
             tableEntryTimes.put(selectedTable, LocalDateTime.now().format(DateTimeFormatter.ofPattern("hh:mm a")));
@@ -2149,7 +2219,7 @@ private Label captainLabel;
         totalLabel.setText(String.format("الإجمالي: %.2f جنيه", total));
     }
 
-  private void loadTableOrderToScreen(String tableName) {
+    private void loadTableOrderToScreen(String tableName) {
         // 1. تحديث اسم الطاولة المختارة
         this.selectedTable = tableName;
         if (currentTableLabel != null) {
