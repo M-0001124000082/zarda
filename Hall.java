@@ -20,11 +20,17 @@ import javax.print.attribute.PrintRequestAttributeSet;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import javafx.print.PrinterJob;
 import javafx.scene.Scene;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyCodeCombination;
+import javafx.scene.input.KeyCombination;
+import javafx.scene.input.KeyEvent;
+import javafx.stage.Modality;
 
 public class Hall {
 
@@ -48,6 +54,10 @@ public class Hall {
     private static final Map<String, String> tableEntryTimes = new HashMap<>();
     private static final List<DailyInvoiceRecord> dailyInvoicesLog = new ArrayList<>();
 
+    private static final Map<String, String> specialTableCustomerNames = new HashMap<>();
+    private static final Map<String, List<TableOrderItem>> persistentAglOrders = new HashMap<>();
+    private static final Map<String, List<String>> categoryDailyPrintLogs = new HashMap<>();
+    private static final Map<String, List<String>> itemCommentsMap = new HashMap<>();
     private static final Map<String, Integer> kitchenShishaItemCounts = new HashMap<>();
     private static final Map<Integer, PlaystationDevice> psDevices = new HashMap<>();
 
@@ -65,6 +75,66 @@ public class Hall {
     private TilePane itemsGrid;
     private VBox subCategoriesBox;
 
+    private void syncTableToDatabase(String tableName) {
+        List<TableOrderItem> items = activeTableOrders.get(tableName);
+        boolean hasOrders = (items != null && !items.isEmpty());
+
+        if (hasOrders) {
+            int currentState = tableStates.getOrDefault(tableName, 1);
+            if (currentState != 2) {
+                tableStates.put(tableName, 1);
+            }
+        } else {
+            tableStates.put(tableName, 0);
+        }
+
+        try (Connection conn = DBConnection.getConnection()) {
+            if (hasOrders) {
+                String upsertTable = "INSERT INTO tables_status (table_number, is_busy, note) VALUES (?, 1, ?) "
+                        + "ON DUPLICATE KEY UPDATE is_busy = 1, note = VALUES(note)";
+                try (PreparedStatement pstmt = conn.prepareStatement(upsertTable)) {
+                    pstmt.setString(1, tableName);
+                    pstmt.setString(2, tableNotes.getOrDefault(tableName, ""));
+                    pstmt.executeUpdate();
+                }
+
+                String deleteOrders = "DELETE FROM active_orders WHERE table_number = ?";
+                try (PreparedStatement pstmt = conn.prepareStatement(deleteOrders)) {
+                    pstmt.setString(1, tableName);
+                    pstmt.executeUpdate();
+                }
+
+                String insertOrder = "INSERT INTO active_orders (table_number, item_raw_line) VALUES (?, ?)";
+                try (PreparedStatement pstmt = conn.prepareStatement(insertOrder)) {
+                    for (TableOrderItem item : items) {
+                        pstmt.setString(1, tableName);
+                        pstmt.setString(2, item.rawLine);
+                        pstmt.addBatch();
+                    }
+                    pstmt.executeBatch();
+                }
+            } else {
+                String updateTable = "UPDATE tables_status SET is_busy = 0, note = '' WHERE table_number = ?";
+                try (PreparedStatement pstmt = conn.prepareStatement(updateTable)) {
+                    pstmt.setString(1, tableName);
+                    pstmt.executeUpdate();
+                }
+
+                String deleteOrders = "DELETE FROM active_orders WHERE table_number = ?";
+                try (PreparedStatement pstmt = conn.prepareStatement(deleteOrders)) {
+                    pstmt.setString(1, tableName);
+                    pstmt.executeUpdate();
+                }
+
+                tableNotes.remove(tableName);
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+
+        updateTablesStats();
+    }
+
     public Hall(Stage stage) {
         this.stage = stage;
         initPlaystationDevices();
@@ -76,7 +146,7 @@ public class Hall {
     }
 
     private String getCaptainForTable(String tbl) {
-        if (tbl.equals("199 إدارة") || tbl.equals("198 سوق") || tbl.equals("200 استاف")) {
+        if (tbl.contains("إدارة") || tbl.contains("سوق") || tbl.contains("استاف") || tbl.contains("خصوص")) {
             return "إدارة وخاصة بالسيستم";
         }
         if (tbl.startsWith("PS")) {
@@ -84,7 +154,7 @@ public class Hall {
         }
         try {
             int tNum = Integer.parseInt(tbl);
-            if (tNum <= 100) {
+            if (tNum <= 99) {
                 return "كابتن صالة جوه: ك/ أحمد متولي";
             } else {
                 return "كابتن صالة بره: ك/ إسلام محمد";
@@ -140,11 +210,11 @@ public class Hall {
                 dailyIncomeLabel
         );
 
-        Label tablesTitle = new Label("اختر الطاولة أو البلايستيشن");
+        Label tablesTitle = new Label("اختر الطاولة أو البلايستيشن أو الأقسام الخاصة");
         tablesTitle.setStyle("-fx-font-size: 16px; -fx-font-weight: bold;");
 
         TextField searchTableField = new TextField();
-        searchTableField.setPromptText("ابحث برقم الطاولة أو PS...");
+        searchTableField.setPromptText("ابحث برقم الطاولة أو PS أو القسم...");
         searchTableField.setStyle("-fx-font-size: 14px; -fx-padding: 8px;");
         searchTableField.textProperty().addListener((observable, oldValue, newValue) -> filterTables(newValue));
 
@@ -153,12 +223,32 @@ public class Hall {
         tablesGrid.setVgap(8);
         tablesGrid.setPrefColumns(5);
 
-        populateTables(1, 200);
+        populateTables(1, 199);
 
         ScrollPane tablesScroll = new ScrollPane(tablesGrid);
         tablesScroll.setFitToWidth(true);
         tablesScroll.setFitToHeight(true);
         VBox.setVgrow(tablesScroll, Priority.ALWAYS);
+
+        Button marketSecBtn = new Button(" السوق ");
+        marketSecBtn.setStyle("-fx-background-color: #607d8b; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 11px;");
+        marketSecBtn.setOnAction(e -> showSpecialCategoryDialog("سوق", 8));
+
+        Button mgmtSecBtn = new Button("الاداره");
+        mgmtSecBtn.setStyle("-fx-background-color: #3f51b5; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 11px;");
+        mgmtSecBtn.setOnAction(e -> showSpecialCategoryDialog("إدارة", 6));
+
+        Button specialSecBtn = new Button("ترابيزات اجل");
+        specialSecBtn.setStyle("-fx-background-color: #e91e63; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 11px;");
+        specialSecBtn.setOnAction(e -> showSpecialCategoryDialog("خصوص", 10));
+
+        Button staffSecBtn = new Button("الاستف");
+        staffSecBtn.setStyle("-fx-background-color: #009688; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 11px;");
+        staffSecBtn.setOnAction(e -> showSpecialCategoryDialog("استاف", 5));
+
+        HBox specialSectionsBox = new HBox(5);
+        specialSectionsBox.setAlignment(Pos.CENTER);
+        specialSectionsBox.getChildren().addAll(marketSecBtn, mgmtSecBtn, specialSecBtn, staffSecBtn);
 
         Button dailyLogBtn = new Button("سجل وردية اليوم والتعديلات 📋");
         dailyLogBtn.setStyle("-fx-background-color: #5bc0de; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px; -fx-padding: 10px;");
@@ -179,7 +269,7 @@ public class Hall {
         VBox tablesPanel = new VBox(10);
         tablesPanel.setAlignment(Pos.TOP_CENTER);
         tablesPanel.setPrefWidth(350);
-        tablesPanel.getChildren().addAll(tablesTitle, searchTableField, tablesScroll, logBtnsBox);
+        tablesPanel.getChildren().addAll(tablesTitle, searchTableField, tablesScroll, specialSectionsBox, logBtnsBox);
 
         itemsGrid = new TilePane();
         itemsGrid.setHgap(10);
@@ -232,40 +322,18 @@ public class Hall {
         orderList.setStyle("-fx-font-family: 'Consolas', 'Courier New', monospace; -fx-font-size: 14px; -fx-font-weight: bold;");
         VBox.setVgrow(orderList, Priority.ALWAYS);
 
-        tableNoteDisplayLabel = new Label("ملاحظة الطاولة: لا يوجد");
-        tableNoteDisplayLabel.setStyle("-fx-font-size: 13px; -fx-text-fill: #d9534f; -fx-font-weight: bold;");
-
-        Button addNoteBtn = new Button("إضافة / تعديل ملاحظة 📝");
-        addNoteBtn.setStyle("-fx-background-color: #f0ad4e; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 12px; -fx-padding: 8px;");
-        addNoteBtn.setMaxWidth(Double.MAX_VALUE);
-        addNoteBtn.setOnAction(e -> showTableNoteDialog());
-
-        Button plusBtn = new Button("زيادة (+)");
-        Button minusBtn = new Button("تقليل (-)");
-        Button deleteItemBtn = new Button("حذف صنف ❌");
-
-        plusBtn.setStyle("-fx-font-weight: bold; -fx-font-size: 12px; -fx-padding: 8px;");
-        minusBtn.setStyle("-fx-font-weight: bold; -fx-font-size: 12px; -fx-padding: 8px;");
-        deleteItemBtn.setStyle("-fx-background-color: #d9534f; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 12px; -fx-padding: 8px;");
-
-        HBox.setHgrow(plusBtn, Priority.ALWAYS);
-        HBox.setHgrow(minusBtn, Priority.ALWAYS);
-        HBox.setHgrow(deleteItemBtn, Priority.ALWAYS);
-
-        plusBtn.setOnAction(e -> modifyQuantity(1));
-        minusBtn.setOnAction(e -> modifyQuantity(-1));
-        deleteItemBtn.setOnAction(e -> deleteSelectedOrderItem());
-
-        HBox qtyBox = new HBox(8);
-        qtyBox.setAlignment(Pos.CENTER);
-        qtyBox.getChildren().addAll(plusBtn, minusBtn, deleteItemBtn);
+        orderList.setOnMouseClicked(event -> {
+            if (event.getClickCount() == 2) {
+                handleDoubleClickRemove();
+            }
+        });
 
         Button previewCustomerBtn = new Button("📄 معاينة شيك الزبون");
         previewCustomerBtn.setStyle("-fx-background-color: #337ab7; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px; -fx-padding: 8px;");
         previewCustomerBtn.setMaxWidth(Double.MAX_VALUE);
         previewCustomerBtn.setOnAction(e -> showSinglePreviewDialog("معاينة شيك الزبون - " + selectedTable, generateFullCustomerReceiptText(orderCounter)));
 
-        Button previewKitchenBtn = new Button("🍳 بون المطبخ");
+        Button previewKitchenBtn = new Button(" بون المطبخ");
         previewKitchenBtn.setStyle("-fx-background-color: #5bc0de; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px; -fx-padding: 8px;");
         previewKitchenBtn.setMaxWidth(Double.MAX_VALUE);
         previewKitchenBtn.setOnAction(e -> showSinglePreviewDialog("معاينة بون المطبخ - " + selectedTable, generateFullKitchenTicketText()));
@@ -289,7 +357,6 @@ public class Hall {
         rightPanel.setPrefWidth(380);
         rightPanel.getChildren().addAll(
                 currentOrderHeader, orderList,
-                tableNoteDisplayLabel, addNoteBtn, qtyBox,
                 new Label("خيارات المعاينة السريعة:"),
                 previewCustomerBtn,
                 previewsButtonsBox
@@ -303,41 +370,354 @@ public class Hall {
         totalLabel = new Label("الإجمالي: 0.0 جنيه");
         totalLabel.setStyle("-fx-font-size:22px; -fx-font-weight: bold; -fx-text-fill: #2e7d32;");
 
-        Button saveTableOrderBtn = new Button("حفظ الأوردر 💾");
-        saveTableOrderBtn.setStyle("-fx-background-color: #337ab7; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10px 15px;");
-        saveTableOrderBtn.setOnAction(e -> saveCurrentOrderToTable());
+        Button invoicesBtn = new Button("🧾 فواتير");
+        invoicesBtn.setStyle("-fx-background-color: #9c27b0; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 15px; -fx-padding: 10px 15px;");
+        invoicesBtn.setOnAction(e -> showInvoicesSelectionDialog());
 
         Button confirmOnlyBtn = new Button("إرسال للمطبخ/الشيش 🚀");
         confirmOnlyBtn.setStyle("-fx-background-color: #f0ad4e; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10px 15px;");
         confirmOnlyBtn.setOnAction(e -> confirmOrderToKitchenAndShishaWithoutClientPrint());
 
-        Button clearOrderBtn = new Button("مسح 🗑️");
-        clearOrderBtn.setStyle("-fx-background-color: #d9534f; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10px 15px;");
-        clearOrderBtn.setOnAction(e -> clearCurrentScreenOrder());
-
         Button payAndPrintBtn = new Button("ادفع 💳");
         payAndPrintBtn.setStyle("-fx-background-color: #2e7d32; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 15px; -fx-padding: 10px 20px;");
         payAndPrintBtn.setOnAction(e -> showPaymentOptionsDialog());
 
-        Button backBtn = new Button("رجوع");
-        backBtn.setStyle("-fx-font-size: 14px; -fx-padding: 10px 15px;");
-        backBtn.setOnAction(e -> {
-            Dashboard dashboard = new Dashboard(stage, "captain");
-            stage.setScene(new javafx.scene.Scene(dashboard.getView(), 1280, 720));
+        Button logoutBtn = new Button("تسجيل الخروج 🚪");
+        logoutBtn.setStyle("-fx-background-color: #d9534f; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 14px; -fx-padding: 10px 15px;");
+        logoutBtn.setOnAction(e -> {
+            LoginScreen loginScreen = new LoginScreen(stage);
+            stage.setScene(new Scene(loginScreen.getView(), 1000, 700));
         });
 
         HBox bottomActions = new HBox(15);
+
         bottomActions.setAlignment(Pos.CENTER);
+
         bottomActions.setPadding(new Insets(10));
+
         bottomActions.setStyle("-fx-background-color: #ffffff; -fx-border-color: #e0e0e0; -fx-border-radius: 8px; -fx-background-radius: 8px;");
-        bottomActions.getChildren().addAll(totalLabel, saveTableOrderBtn, confirmOnlyBtn, clearOrderBtn, payAndPrintBtn, backBtn);
+
+        bottomActions.getChildren().addAll(totalLabel, confirmOnlyBtn, payAndPrintBtn, logoutBtn);
 
         root.getChildren().addAll(headerBox, mainLayout, bottomActions);
+
+    }
+
+    private void handleDoubleClickRemove() {
+        int selectedIndex = orderList.getSelectionModel().getSelectedIndex();
+        if (selectedIndex < 0) {
+            return;
+        }
+
+        List<TableOrderItem> items = activeTableOrders.get(selectedTable);
+        if (items == null || selectedIndex >= items.size()) {
+            return;
+        }
+
+        TableOrderItem itemToModify = items.get(selectedIndex);
+
+        if (itemToModify.sentToKitchen) {
+            TextInputDialog passDialog = new TextInputDialog();
+            passDialog.setTitle("تأكيد الإلغاء");
+            passDialog.setHeaderText("هذا الطلب تم إرساله للمطبخ بالفعل!");
+            passDialog.setContentText("أدخل كلمة السر لإلغاء/تقليل الصنف:");
+
+            var result = passDialog.showAndWait();
+            if (result.isPresent()) {
+                String enteredPass = result.get();
+
+                if (!"1234".equals(enteredPass)) {
+                    Alert alert = new Alert(Alert.AlertType.ERROR, "كلمة السر غير صحيحة! لا يمكن إلغاء الطلب.", ButtonType.OK);
+                    alert.showAndWait();
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+
+        items.remove(selectedIndex);
+        syncTableToDatabase(selectedTable);
+        loadTableOrderToScreen(selectedTable);
+    }
+
+    // نافذة اختيار الفواتير والأقسام الجديدة للـ معاينة والطباعة (سوق، إدارة، صالة جوه 1-99، صالة بره 99-199، آجل، استاف)
+    private void showInvoicesSelectionDialog() {
+        Stage invStage = new Stage();
+        invStage.setTitle("إدارة فواتير ومعاينة الأقسام والترابيزات من الشفت");
+
+        VBox layout = new VBox(12);
+        layout.setPadding(new Insets(15));
+        layout.setAlignment(Pos.CENTER);
+
+        Label titleLbl = new Label("اختر القسم أو النطاق المطلوب لمعاينة وطباعة أوردرات الوردية:");
+        titleLbl.setStyle("-fx-font-size: 15px; -fx-font-weight: bold; -fx-text-fill: #8B5E3C;");
+
+        GridPane btnGrid = new GridPane();
+        btnGrid.setHgap(10);
+        btnGrid.setVgap(10);
+        btnGrid.setAlignment(Pos.CENTER);
+
+        Button btnMarket = createCategoryInvoiceButton("سوق", "#607d8b");
+        Button btnMgmt = createCategoryInvoiceButton("إدارة", "#3f51b5");
+        Button btnStaff = createCategoryInvoiceButton("استاف", "#009688");
+        Button btnAgl = createCategoryInvoiceButton("خصوص (آجل)", "#e91e63");
+        Button btnHallIn = new Button("صالة جوه (1 إلى 99)");
+        Button btnHallOut = new Button("صالة بره (99 إلى 199)");
+
+        styleCategoryButton(btnHallIn, "#ff9800");
+        styleCategoryButton(btnHallOut, "#795548");
+
+        btnHallIn.setOnAction(e -> showCategoryOrdersPreviewWindow("صالة جوه (1 - 99)", 1, 99));
+        btnHallOut.setOnAction(e -> showCategoryOrdersPreviewWindow("صالة بره (99 - 199)", 99, 199));
+
+        btnGrid.add(btnMarket, 0, 0);
+        btnGrid.add(btnMgmt, 1, 0);
+        btnGrid.add(btnStaff, 0, 1);
+        btnGrid.add(btnAgl, 1, 1);
+        btnGrid.add(btnHallIn, 0, 2, 2, 1);
+        btnGrid.add(btnHallOut, 0, 3, 2, 1);
+
+        layout.getChildren().addAll(titleLbl, btnGrid);
+        invStage.setScene(new Scene(layout, 420, 360));
+        invStage.show();
+    }
+
+    private Button createCategoryInvoiceButton(String categoryName, String colorHex) {
+        Button btn = new Button("قسم " + categoryName);
+        styleCategoryButton(btn, colorHex);
+        btn.setOnAction(e -> showSpecialCategoryOrdersPreviewWindow(categoryName));
+        return btn;
+    }
+
+    private void styleCategoryButton(Button btn, String colorHex) {
+        btn.setPrefSize(190, 45);
+        btn.setStyle("-fx-background-color: " + colorHex + "; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px; -fx-background-radius: 6px;");
+    }
+
+    // معاينة وطباعة أوردرات الأقسام الخاصة (سوق، إدارة، استاف، خصوص)
+    private void showSpecialCategoryOrdersPreviewWindow(String categoryName) {
+        Stage previewStage = new Stage();
+        previewStage.setTitle("معاينة أوردرات قسم: " + categoryName);
+
+        VBox container = new VBox(10);
+        container.setPadding(new Insets(15));
+        container.setAlignment(Pos.TOP_CENTER);
+        container.setStyle("-fx-background-color: #ffffff;");
+
+        Label header = new Label("تقرير أوردرات قسم (" + categoryName + ") من الشفت");
+        header.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; -fx-text-fill: #333;");
+
+        TextArea textArea = new TextArea();
+        textArea.setEditable(false);
+        textArea.setStyle("-fx-font-family: 'Consolas', 'Courier New', monospace; -fx-font-size: 13px;");
+        VBox.setVgrow(textArea, Priority.ALWAYS);
+
+        StringBuilder reportBuilder = new StringBuilder();
+        reportBuilder.append("================================================\n");
+        reportBuilder.append("       تقرير أوردرات قسم : ").append(categoryName).append("\n");
+        reportBuilder.append("       التاريخ والوقت : ").append(LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"))).append("\n");
+        reportBuilder.append("================================================\n\n");
+
+        double totalCategoryAmount = 0;
+        int countItems = (categoryName.equals("سوق")) ? 8 : (categoryName.equals("إدارة")) ? 6 : (categoryName.equals("استاف")) ? 5 : 10;
+
+        for (int i = 1; i <= countItems; i++) {
+            String elementKey = categoryName + " " + i;
+            String customerName = specialTableCustomerNames.getOrDefault(elementKey, "");
+            List<TableOrderItem> orders = activeTableOrders.get(elementKey);
+            if (orders == null || orders.isEmpty()) {
+                if (categoryName.equals("خصوص")) {
+                    orders = persistentAglOrders.get(elementKey);
+                }
+            }
+
+            if (orders != null && !orders.isEmpty()) {
+                reportBuilder.append(" العنصر / الطاولة: ").append(elementKey);
+                if (!customerName.isEmpty()) {
+                    reportBuilder.append(" [الزبون: ").append(customerName).append("]");
+                }
+                reportBuilder.append("\n------------------------------------------------\n");
+
+                double tableSum = 0;
+                for (TableOrderItem item : orders) {
+                    reportBuilder.append("  * ").append(item.rawLine).append("\n");
+                    try {
+                        String pricePart = item.rawLine.split(" \\| ")[2].split(" \\[")[0].trim();
+                        tableSum += Double.parseDouble(pricePart);
+                    } catch (Exception ignored) {
+                    }
+                }
+                reportBuilder.append(" إجمالي العنصر: ").append(String.format("%.2f", tableSum)).append(" ج.م\n");
+                reportBuilder.append("------------------------------------------------\n\n");
+                totalCategoryAmount += tableSum;
+            }
+        }
+
+        reportBuilder.append("================================================\n");
+        reportBuilder.append(String.format(" إجمالي ايراد القسم بالكامل بالوردية : %.2f جنيه\n", totalCategoryAmount));
+        reportBuilder.append("================================================\n");
+
+        textArea.setText(reportBuilder.toString());
+
+        Button printBtn = new Button("🖨️ طباعة البون للحساب والتحاسب");
+        printBtn.setStyle("-fx-background-color: #2e7d32; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 10px; -fx-font-size: 13px;");
+        printBtn.setMaxWidth(Double.MAX_VALUE);
+        printBtn.setOnAction(e -> sendTextToPrinter(reportBuilder.toString()));
+
+        container.getChildren().addAll(header, textArea, printBtn);
+        previewStage.setScene(new Scene(container, 450, 500));
+        previewStage.show();
+    }
+
+    // معاينة وطباعة أوردرات صالة جوه (1-99) وصالة بره (99-199) من أول الشفت لآخره مع إجمالي الحسابات
+    private void showCategoryOrdersPreviewWindow(String titleText, int startRange, int endRange) {
+        Stage previewStage = new Stage();
+        previewStage.setTitle("معاينة أوردرات " + titleText);
+
+        VBox container = new VBox(10);
+        container.setPadding(new Insets(15));
+        container.setAlignment(Pos.TOP_CENTER);
+        container.setStyle("-fx-background-color: #ffffff;");
+
+        Label header = new Label("تقرير أوردرات " + titleText + " من أول الشفت");
+        header.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; -fx-text-fill: #333;");
+
+        TextArea textArea = new TextArea();
+        textArea.setEditable(false);
+        textArea.setStyle("-fx-font-family: 'Consolas', 'Courier New', monospace; -fx-font-size: 13px;");
+        VBox.setVgrow(textArea, Priority.ALWAYS);
+
+        StringBuilder reportBuilder = new StringBuilder();
+        reportBuilder.append("================================================\n");
+        reportBuilder.append("       تقرير أوردرات : ").append(titleText).append("\n");
+        reportBuilder.append("       التاريخ والوقت : ").append(LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"))).append("\n");
+        reportBuilder.append("================================================\n\n");
+
+        double totalRangeAmount = 0;
+
+        for (int i = startRange; i <= endRange; i++) {
+            String tblName = String.valueOf(i);
+            List<TableOrderItem> orders = activeTableOrders.get(tblName);
+
+            if (orders != null && !orders.isEmpty()) {
+                reportBuilder.append(" طاولة رقم: ").append(tblName).append("\n");
+                reportBuilder.append("------------------------------------------------\n");
+
+                double tableSum = 0;
+                for (TableOrderItem item : orders) {
+                    reportBuilder.append("  * ").append(item.rawLine).append("\n");
+                    try {
+                        String pricePart = item.rawLine.split(" \\| ")[2].split(" \\[")[0].trim();
+                        tableSum += Double.parseDouble(pricePart);
+                    } catch (Exception ignored) {
+                    }
+                }
+                reportBuilder.append(" إجمالي الطاولة: ").append(String.format("%.2f", tableSum)).append(" ج.م\n");
+                reportBuilder.append("------------------------------------------------\n\n");
+                totalRangeAmount += tableSum;
+            }
+        }
+
+        reportBuilder.append("================================================\n");
+        reportBuilder.append(String.format(" إجمالي ايراد النطاق (%s) بالوردية : %.2f جنيه\n", titleText, totalRangeAmount));
+        reportBuilder.append("================================================\n");
+
+        textArea.setText(reportBuilder.toString());
+
+        Button printBtn = new Button("🖨️ طباعة بون النطاق للتحاسب مع الكابتن");
+        printBtn.setStyle("-fx-background-color: #2e7d32; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 10px; -fx-font-size: 13px;");
+        printBtn.setMaxWidth(Double.MAX_VALUE);
+        printBtn.setOnAction(e -> sendTextToPrinter(reportBuilder.toString()));
+
+        container.getChildren().addAll(header, textArea, printBtn);
+        previewStage.setScene(new Scene(container, 450, 500));
+        previewStage.show();
+    }
+
+    private void showSpecialCategoryDialog(String categoryName, int count) {
+        Stage secStage = new Stage();
+        secStage.setTitle("إدارة قسم " + categoryName);
+
+        VBox layout = new VBox(10);
+        layout.setPadding(new Insets(15));
+        layout.setAlignment(Pos.CENTER);
+
+        Label header = new Label("اختر من قسم " + categoryName + " (من 5 إلى 10 عناصر):");
+        header.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; -fx-text-fill: #8B5E3C;");
+
+        TilePane grid = new TilePane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setAlignment(Pos.CENTER);
+        grid.setPrefColumns(3);
+
+        for (int i = 1; i <= count; i++) {
+            final String itemName = categoryName + " " + i;
+            Button btn = new Button(itemName);
+            btn.setPrefSize(110, 50);
+
+            String customerName = specialTableCustomerNames.getOrDefault(itemName, "");
+            String btnText = customerName.isEmpty() ? itemName : itemName + "\n(" + customerName + ")";
+            btn.setText(btnText);
+
+            updateTableColorStyle(btn, itemName);
+
+            btn.setOnAction(e -> {
+                TextInputDialog nameDialog = new TextInputDialog(customerName);
+                nameDialog.setTitle("تسجيل اسم صاحب الأوردر");
+                nameDialog.setHeaderText("أدخل اسم الزبون للـ " + itemName + (categoryName.equals("خصوص") ? " (مفتوح بالآجل عدة أيام)" : ""));
+                nameDialog.setContentText("اسم الزبون:");
+                nameDialog.showAndWait().ifPresent(name -> {
+                    if (!name.trim().isEmpty()) {
+                        specialTableCustomerNames.put(itemName, name.trim());
+                    }
+                });
+
+                selectedTable = itemName;
+                currentTableLabel.setText("الطاولة: " + selectedTable + (specialTableCustomerNames.containsKey(itemName) ? " [" + specialTableCustomerNames.get(itemName) + "]" : ""));
+                loadTableOrderToScreen(selectedTable);
+                secStage.close();
+            });
+            grid.getChildren().add(btn);
+        }
+
+        Button printAllDayLogBtn = new Button("🖨️ سجل طباعة كل أوردرات اليوم للقسم");
+        printAllDayLogBtn.setStyle("-fx-background-color: #337ab7; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 10px;");
+        printAllDayLogBtn.setMaxWidth(Double.MAX_VALUE);
+        printAllDayLogBtn.setOnAction(e -> {
+            StringBuilder allDayText = new StringBuilder();
+            allDayText.append("=== سجل طباعة أوردرات يوم قسم ").append(categoryName).append(" ===\n");
+            allDayText.append("التاريخ: ").append(LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy"))).append("\n");
+            allDayText.append("------------------------------------------------\n");
+
+            double catTotal = 0;
+            for (int i = 1; i <= count; i++) {
+                String tName = categoryName + " " + i;
+                String cName = specialTableCustomerNames.getOrDefault(tName, "بدون اسم");
+                List<TableOrderItem> tOrders = activeTableOrders.get(tName);
+                if (tOrders != null && !tOrders.isEmpty()) {
+                    allDayText.append("العنصر/الطاولة: ").append(tName).append(" | الزبون: ").append(cName).append("\n");
+                    for (TableOrderItem item : tOrders) {
+                        allDayText.append("  - ").append(item.rawLine).append("\n");
+                    }
+                    allDayText.append("------------------------------------------------\n");
+                }
+            }
+
+            sendTextToPrinter(allDayText.toString());
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم طباعة سجل كل أوردرات القسم بنجاح!", ButtonType.OK);
+            alert.showAndWait();
+        });
+
+        layout.getChildren().addAll(header, grid, printAllDayLogBtn);
+        secStage.setScene(new Scene(layout, 400, 400));
+        secStage.show();
     }
 
     private void updateTablesStats() {
         long busyTables = tableStates.values().stream().filter(s -> s == 1).count();
-        long freeTables = 200 - busyTables;
+        long freeTables = 199 - busyTables;
         if (tablesStatsLabel != null) {
             tablesStatsLabel.setText(String.format("مشغولة: %d | فارغة: %d", busyTables, freeTables));
         }
@@ -365,11 +745,57 @@ public class Hall {
     }
 
     private void openKitchenShishaLogWindow() {
-        Alert alert = new Alert(Alert.AlertType.INFORMATION);
-        alert.setTitle("سجل المطبخ والشيشة");
-        alert.setHeaderText("تفاصيل المطبخ والشيشة");
-        alert.setContentText("إجمالي الشيشة: " + dailyShishaIncome + "ج\nإجمالي المطبخ والمشاريب: " + dailyDrinksIncome + "ج");
-        alert.showAndWait();
+        Stage logStage = new Stage();
+        logStage.setTitle("سجل المطبخ والشيشة وموقف المحاسبة");
+
+        VBox container = new VBox(10);
+        container.setPadding(new Insets(15));
+        container.setAlignment(Pos.TOP_CENTER);
+        container.setStyle("-fx-background-color: #ffffff;");
+
+        Label header = new Label("سجل أوردرات المطبخ والشيشة وموقف الدفع");
+        header.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; -fx-text-fill: #8B5E3C;");
+
+        TextArea textArea = new TextArea();
+        textArea.setEditable(false);
+        textArea.setStyle("-fx-font-family: 'Consolas', 'Courier New', monospace; -fx-font-size: 13px;");
+        VBox.setVgrow(textArea, Priority.ALWAYS);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("================================================\n");
+        sb.append("       سجل المطبخ والشيشة وموقف المحاسبة\n");
+        sb.append("================================================\n\n");
+
+        sb.append("--- الطلبات النشطة (التي ذهبت للمطبخ/الشيشة ولم تُحاسب بعد) ---\n");
+        boolean hasActive = false;
+        for (Map.Entry<String, List<TableOrderItem>> entry : activeTableOrders.entrySet()) {
+            String tbl = entry.getKey();
+            for (TableOrderItem item : entry.getValue()) {
+                if (item.rawLine.contains("[kitchen]") || item.rawLine.contains("[shisha]")) {
+                    sb.append(String.format("طاولة/قسم: %s | الطلب: %s | الحالة: [غير محتسب / معلق]\n", tbl, item.rawLine));
+                    hasActive = true;
+                }
+            }
+        }
+        if (!hasActive) {
+            sb.append("لا توجد طلبات معلقة حالياً.\n");
+        }
+
+        sb.append("\n------------------------------------------------\n");
+        sb.append("--- إجمالي الإيرادات المحصلة حتى الآن ---\n");
+        sb.append(String.format("إجمالي الشيشة المحصلة : %.2f ج.م\n", dailyShishaIncome));
+        sb.append(String.format("إجمالي المطبخ والمشاريب المحصلة : %.2f ج.م\n", dailyDrinksIncome));
+        sb.append("================================================\n");
+
+        textArea.setText(sb.toString());
+
+        Button closeBtn = new Button("إغلاق");
+        closeBtn.setStyle("-fx-background-color: #d9534f; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 8px 20px;");
+        closeBtn.setOnAction(e -> logStage.close());
+
+        container.getChildren().addAll(header, textArea, closeBtn);
+        logStage.setScene(new Scene(container, 500, 500));
+        logStage.show();
     }
 
     private void updateHeaderStats() {
@@ -395,14 +821,6 @@ public class Hall {
         tablesGrid.getChildren().clear();
         for (int i = start; i <= end; i++) {
             String tblName = String.valueOf(i);
-            if (i == 199) {
-                tblName = "199 إدارة";
-            } else if (i == 198) {
-                tblName = "198 سوق";
-            } else if (i == 200) {
-                tblName = "200 استاف";
-            }
-
             final String finalTblName = tblName;
             Button tBtn = new Button(finalTblName);
             tBtn.setPrefWidth(60);
@@ -418,12 +836,26 @@ public class Hall {
         }
     }
 
-    private void updateTableColorStyle(Button btn, String tblName) {
-        int state = tableStates.getOrDefault(tblName, 0);
-        if (state == 0) {
-            btn.setStyle("-fx-background-color: #d9534f; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 12px;");
-        } else {
-            btn.setStyle("-fx-background-color: #337ab7; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 12px;");
+    private void updateTableColorStyle(Button btn, String tableName) {
+
+        int state = tableStates.getOrDefault(tableName, 0);
+
+        List<TableOrderItem> items = activeTableOrders.get(tableName);
+        if (state == 0 && items != null && !items.isEmpty()) {
+            state = 1;
+        }
+
+        switch (state) {
+            case 1:
+                btn.setStyle("-fx-background-color: #f0ad4e; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px; -fx-border-color: #d68b00; -fx-border-radius: 5px; -fx-background-radius: 5px;");
+                break;
+            case 2:
+                btn.setStyle("-fx-background-color: #2e7d32; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px; -fx-border-color: #1b5e20; -fx-border-radius: 5px; -fx-background-radius: 5px;");
+                break;
+            case 0:
+            default:
+                btn.setStyle("-fx-background-color: #d9534f; -fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 13px; -fx-border-color: #c9302c; -fx-border-radius: 5px; -fx-background-radius: 5px;");
+                break;
         }
     }
 
@@ -434,8 +866,8 @@ public class Hall {
         VBox mainContainer = new VBox(10);
         mainContainer.setAlignment(Pos.CENTER);
 
-        // إذا كان البون لشيك الزبون -> ارسم الواجهة الرسمية لشيك الزبون
         if (title.contains("شيك الزبون")) {
+           
             VBox receipt = new VBox(4);
             receipt.setPadding(new Insets(10, 15, 10, 15));
             receipt.setAlignment(Pos.TOP_CENTER);
@@ -464,7 +896,9 @@ public class Hall {
                 captain = captain.split(": ")[1];
             }
 
-            infoGrid.add(createStyledLabel("الطاولة : " + selectedTable, true), 0, 0);
+            String customerLabelStr = specialTableCustomerNames.containsKey(selectedTable) ? "الزبون : " + specialTableCustomerNames.get(selectedTable) : "الطاولة : " + selectedTable;
+
+            infoGrid.add(createStyledLabel(customerLabelStr, true), 0, 0);
             infoGrid.add(createStyledLabel(String.valueOf(orderCounter), true), 2, 0);
 
             infoGrid.add(createStyledLabel("الكابتن : " + captain, false), 0, 1);
@@ -573,9 +1007,7 @@ public class Hall {
             mainContainer.getChildren().add(scrollPane);
 
         } else {
-            // -------------------------------------------------------------
-            // ورقة بون المطبخ / الشيشة الحقيقية المخصصة للطباعة الحرارية
-            // -------------------------------------------------------------
+ 
             VBox paperReceipt = new VBox(8);
             paperReceipt.setPadding(new Insets(15));
             paperReceipt.setAlignment(Pos.TOP_CENTER);
@@ -585,14 +1017,12 @@ public class Hall {
 
             boolean isShishaFilter = title.contains("شيشة");
 
-            // 1. عنوان البون
-            Label headerLabel = new Label(isShishaFilter ? "--- بون الشيشة ---" : "--- بون المطبخ ---");
+            Label headerLabel = new Label(isShishaFilter ? "--- بون الشيشة (جديد) ---" : "--- بون المطبخ (جديد) ---");
             headerLabel.setStyle("-fx-font-size: 18px; -fx-font-weight: 900; -fx-text-fill: #000000;");
 
             Label separator1 = new Label("----------------------------------");
             separator1.setStyle("-fx-font-weight: bold; -fx-text-fill: #000000;");
 
-            // 2. معلومات الطاولة والكابتن والوقت
             String captainInfo = getCaptainForTable(selectedTable);
             if (captainInfo.contains(": ")) {
                 captainInfo = captainInfo.split(": ")[1];
@@ -602,7 +1032,8 @@ public class Hall {
             VBox headerDetails = new VBox(3);
             headerDetails.setAlignment(Pos.CENTER_RIGHT);
 
-            Label lblTable = new Label("طاولة : " + selectedTable);
+            String tblOrCustomerStr = specialTableCustomerNames.containsKey(selectedTable) ? "الزبون : " + specialTableCustomerNames.get(selectedTable) : "طاولة : " + selectedTable;
+            Label lblTable = new Label(tblOrCustomerStr);
             lblTable.setStyle("-fx-font-size: 16px; -fx-font-weight: 900; -fx-text-fill: #000000;");
 
             Label lblCaptain = new Label("الكابتن : " + captainInfo);
@@ -616,39 +1047,43 @@ public class Hall {
             Label separator2 = new Label("----------------------------------");
             separator2.setStyle("-fx-font-weight: bold; -fx-text-fill: #000000;");
 
-            // 3. جدول/قائمة الطلبات المطلوبة للمطبخ (العدد والطلب تحت بعض)
             VBox itemsList = new VBox(10);
             itemsList.setAlignment(Pos.TOP_RIGHT);
             itemsList.setNodeOrientation(NodeOrientation.RIGHT_TO_LEFT);
 
             boolean hasItems = false;
+            List<TableOrderItem> items = activeTableOrders.get(selectedTable);
 
-            for (String itemLine : orderList.getItems()) {
-                boolean isShishaItem = itemLine.contains("[shisha]");
-                boolean isIgnored = itemLine.contains("[playstation]") || itemLine.contains("[service]");
+            if (items != null) {
+                for (TableOrderItem item : items) {
+                    String itemLine = item.rawLine;
+                    boolean isShishaItem = itemLine.contains("[shisha]");
+                    boolean isIgnored = itemLine.contains("[playstation]") || itemLine.contains("[service]");
 
-                if ((isShishaFilter && isShishaItem) || (!isShishaFilter && !isShishaItem && !isIgnored)) {
-                    String name = itemLine.split(" \\| ")[0].trim();
-                    int qty = extractQuantity(itemLine);
+                    if ((isShishaFilter && isShishaItem) || (!isShishaFilter && !isShishaItem && !isIgnored)) {
+                        int diffQty = item.getUnprintedQty(); 
+                        if (diffQty > 0) {
+                            String name = itemLine.split(" \\| ")[0].trim();
 
-                    HBox itemRow = new HBox(10);
-                    itemRow.setAlignment(Pos.CENTER_RIGHT);
+                            HBox itemRow = new HBox(10);
+                            itemRow.setAlignment(Pos.CENTER_RIGHT);
 
-                    // إبراز العدد بحجم خط كبير وواضح للعمل
-                    Label qtyLabel = new Label("[" + qty + " ×]");
-                    qtyLabel.setStyle("-fx-font-size: 16px; -fx-font-weight: 900; -fx-text-fill: #000000;");
+                            Label qtyLabel = new Label("[" + diffQty + " ×]");
+                            qtyLabel.setStyle("-fx-font-size: 16px; -fx-font-weight: 900; -fx-text-fill: #000000;");
 
-                    Label nameLabel = new Label(name);
-                    nameLabel.setStyle("-fx-font-size: 15px; -fx-font-weight: bold; -fx-text-fill: #000000;");
+                            Label nameLabel = new Label(name);
+                            nameLabel.setStyle("-fx-font-size: 15px; -fx-font-weight: bold; -fx-text-fill: #000000;");
 
-                    itemRow.getChildren().addAll(qtyLabel, nameLabel);
-                    itemsList.getChildren().add(itemRow);
-                    hasItems = true;
+                            itemRow.getChildren().addAll(qtyLabel, nameLabel);
+                            itemsList.getChildren().add(itemRow);
+                            hasItems = true;
+                        }
+                    }
                 }
             }
 
             if (!hasItems) {
-                Label noItemsLbl = new Label("لا توجدطلبات لهـذا القسم");
+                Label noItemsLbl = new Label("لا توجد طلبات جديدة لطباعتها");
                 noItemsLbl.setStyle("-fx-font-size: 13px; -fx-font-weight: bold; -fx-text-fill: #000000;");
                 itemsList.getChildren().add(noItemsLbl);
             }
@@ -656,7 +1091,6 @@ public class Hall {
             Label separator3 = new Label("----------------------------------");
             separator3.setStyle("-fx-font-weight: bold; -fx-text-fill: #000000;");
 
-            // 4. الملاحظات الخاصة بالطاولة
             String noteText = tableNotes.getOrDefault(selectedTable, "");
             VBox noteBox = new VBox(2);
             noteBox.setAlignment(Pos.CENTER_RIGHT);
@@ -702,112 +1136,6 @@ public class Hall {
         return lbl;
     }
 
-    private VBox createKitchenOrShishaReceipt(String titleText, boolean isShisha) {
-        VBox receipt = new VBox(4);
-        receipt.setPadding(new Insets(10, 15, 10, 15));
-        receipt.setAlignment(Pos.TOP_CENTER);
-        receipt.setStyle("-fx-background-color: #ffffff; -fx-font-family: 'Segoe UI', 'Arial', sans-serif;");
-        receipt.setMaxWidth(300);
-        receipt.setMinWidth(300);
-
-        Label mainLogo = new Label("| " + titleText + " |");
-        mainLogo.setStyle("-fx-font-size: 24px; -fx-font-weight: 900; -fx-text-fill: #000;");
-
-        Label subLogo = new Label("ZCAFE");
-        subLogo.setStyle("-fx-font-size: 14px; -fx-font-weight: bold; -fx-letter-spacing: 2px; -fx-padding: 0 0 5 0;");
-
-        GridPane infoGrid = new GridPane();
-        infoGrid.setHgap(5);
-        infoGrid.setVgap(3);
-        infoGrid.setAlignment(Pos.CENTER);
-
-        LocalDateTime now = LocalDateTime.now();
-        String dateStr = now.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"));
-        String timeOut = now.format(DateTimeFormatter.ofPattern("HH:mm"));
-        String timeIn = tableEntryTimes.getOrDefault(selectedTable, timeOut);
-
-        String captain = getCaptainForTable(selectedTable);
-        if (captain.contains(": ")) {
-            captain = captain.split(": ")[1];
-        }
-
-        infoGrid.add(createStyledLabel("الطاولة : " + selectedTable, true), 0, 0);
-        infoGrid.add(createStyledLabel(String.valueOf(orderCounter), true), 2, 0);
-        infoGrid.add(createStyledLabel("الكابتن : " + captain, false), 0, 1);
-        infoGrid.add(createStyledLabel("صالة", false), 2, 1);
-        infoGrid.add(createStyledLabel("اليوم : " + dateStr, false), 0, 2);
-        infoGrid.add(createStyledLabel(timeIn + " In", false), 2, 2);
-
-        GridPane itemsGrid = new GridPane();
-        itemsGrid.setHgap(0);
-        itemsGrid.setVgap(0);
-        itemsGrid.setAlignment(Pos.CENTER);
-        itemsGrid.setPadding(new Insets(8, 0, 8, 0));
-        itemsGrid.setNodeOrientation(NodeOrientation.RIGHT_TO_LEFT);
-
-        Label thItem = createTableCell("الطلبات", true, true, Pos.CENTER_RIGHT);
-        Label thQty = createTableCell("العدد", true, true, Pos.CENTER);
-
-        thItem.setPrefWidth(200);
-        thQty.setPrefWidth(60);
-
-        itemsGrid.add(thItem, 0, 0);
-        itemsGrid.add(thQty, 1, 0);
-
-        int row = 1;
-        boolean hasItems = false;
-
-        for (String itemLine : orderList.getItems()) {
-            boolean isShishaItem = itemLine.contains("[shisha]");
-
-            if ((isShisha && isShishaItem) || (!isShisha && !isShishaItem && !itemLine.contains("[playstation]") && !itemLine.contains("[service]"))) {
-                try {
-                    String[] mainParts = itemLine.split(" \\[");
-                    String[] parts = mainParts[0].split(" \\| ");
-
-                    Label cellItem = createTableCell(parts[0].trim(), false, false, Pos.CENTER_RIGHT);
-                    Label cellQty = createTableCell(parts[1].trim(), false, false, Pos.CENTER);
-
-                    cellItem.setPrefWidth(200);
-                    cellQty.setPrefWidth(60);
-
-                    itemsGrid.add(cellItem, 0, row);
-                    itemsGrid.add(cellQty, 1, row);
-                    row++;
-                    hasItems = true;
-                } catch (Exception ignored) {
-                }
-            }
-        }
-
-        if (!hasItems) {
-            Label emptyCell = createTableCell("لا توجد طلبات", false, false, Pos.CENTER);
-            emptyCell.setPrefWidth(260);
-            itemsGrid.add(emptyCell, 0, 1, 2, 1);
-        }
-
-        String noteText = tableNotes.getOrDefault(selectedTable, "لا توجد ملاحظات");
-
-        VBox notesBox = new VBox(2);
-        notesBox.setAlignment(Pos.CENTER_RIGHT);
-        notesBox.setPadding(new Insets(5, 0, 5, 0));
-
-        Label lblNoteTitle = new Label("الملاحظات:");
-        lblNoteTitle.setStyle("-fx-font-weight: bold; -fx-underline: true; -fx-font-size: 13px;");
-
-        Label lblNoteVal = new Label(noteText);
-        lblNoteVal.setStyle("-fx-font-size: 12px; -fx-text-fill: #333;");
-        lblNoteVal.setWrapText(true);
-
-        notesBox.getChildren().addAll(lblNoteTitle, lblNoteVal);
-
-        Label footerMsg = new Label("Kitchen Ticket . ZCAFE");
-        footerMsg.setStyle("-fx-font-size: 10px; -fx-font-weight: bold; -fx-padding: 10 0 0 0;");
-
-        receipt.getChildren().addAll(mainLogo, subLogo, infoGrid, itemsGrid, notesBox, footerMsg);
-        return receipt;
-    }
-
     private String generateFullCustomerReceiptText(int currentOrderNo) {
         String captainInfo = getCaptainForTable(selectedTable);
         String noteText = tableNotes.getOrDefault(selectedTable, "لا توجد ملاحظات");
@@ -815,13 +1143,14 @@ public class Hall {
         String dateStr = now.format(DateTimeFormatter.ofPattern("dd/MM/yyyy"));
         String timeOut = now.format(DateTimeFormatter.ofPattern("hh:mm a"));
         String timeIn = tableEntryTimes.getOrDefault(selectedTable, timeOut);
+        String customerNameStr = specialTableCustomerNames.getOrDefault(selectedTable, selectedTable);
 
         StringBuilder sb = new StringBuilder();
         sb.append("                  ZCAFE / زردة                  \n");
         sb.append("================================================\n");
         sb.append(String.format("كود الأوردر : #%-10d\n", currentOrderNo));
-        sb.append(String.format("الطاولة     : %-20s\n", selectedTable));
-        sb.append(String.format("البيان       : %-20s\n", captainInfo));
+        sb.append(String.format("الزبون/البيان: %-20s\n", customerNameStr));
+        sb.append(String.format("الجهة       : %-20s\n", captainInfo));
         sb.append(String.format("وقت الدخول  : %-20s\n", timeIn));
         sb.append(String.format("وقت الخروج  : %s | %s\n", timeOut, dateStr));
         sb.append("------------------------------------------------\n");
@@ -849,26 +1178,37 @@ public class Hall {
         String captainInfo = getCaptainForTable(selectedTable);
         String noteText = tableNotes.getOrDefault(selectedTable, "لا توجد ملاحظات");
         String timeIn = tableEntryTimes.getOrDefault(selectedTable, LocalDateTime.now().format(DateTimeFormatter.ofPattern("hh:mm a")));
+        String customerNameStr = specialTableCustomerNames.getOrDefault(selectedTable, selectedTable);
 
         StringBuilder sb = new StringBuilder();
-        sb.append("----------- بون المطبخ / الباريستا -----------\n");
-        sb.append("طاولة      : ").append(selectedTable).append("\n");
-        sb.append("الجهة       : ").append(captainInfo).append("\n");
-        sb.append("وقت الدخول : ").append(timeIn).append("\n");
+        sb.append("----------- بون المطبخ / الباريستا (تحديث) -----------\n");
+        sb.append("الزبون/الطاولة: ").append(customerNameStr).append("\n");
+        sb.append("الجهة        : ").append(captainInfo).append("\n");
+        sb.append("وقت الدخول  : ").append(timeIn).append("\n");
         sb.append("------------------------------------------------\n");
-        boolean hasItems = false;
 
-        for (String itemLine : orderList.getItems()) {
-            if (!itemLine.contains("[shisha]") && !itemLine.contains("[playstation]") && !itemLine.contains("[service]")) {
-                String name = itemLine.split(" \\| ")[0].trim();
-                int qty = extractQuantity(itemLine);
-                sb.append(String.format("• %-25s  (عدد %d)\n", name, qty));
-                hasItems = true;
+        boolean hasItems = false;
+        List<TableOrderItem> items = activeTableOrders.get(selectedTable);
+
+        if (items != null) {
+            for (TableOrderItem item : items) {
+                String itemLine = item.rawLine;
+                 
+                if (!itemLine.contains("[shisha]") && !itemLine.contains("[playstation]") && !itemLine.contains("[service]")) {
+                    int diffQty = item.getUnprintedQty(); 
+                    if (diffQty > 0) {
+                        String name = itemLine.split(" \\| ")[0].trim();
+                        sb.append(String.format("• %-25s  (عدد %d)\n", name, diffQty));
+                        hasItems = true;
+                    }
+                }
             }
         }
+
         if (!hasItems) {
-            sb.append("     (لا توجد أصناف مطبخ/باريستا)\n");
+            return null; 
         }
+
         sb.append("------------------------------------------------\n");
         sb.append("ملاحظة : ").append(noteText).append("\n");
         sb.append("================================================\n");
@@ -879,26 +1219,36 @@ public class Hall {
         String captainInfo = getCaptainForTable(selectedTable);
         String noteText = tableNotes.getOrDefault(selectedTable, "لا توجد ملاحظات");
         String timeIn = tableEntryTimes.getOrDefault(selectedTable, LocalDateTime.now().format(DateTimeFormatter.ofPattern("hh:mm a")));
+        String customerNameStr = specialTableCustomerNames.getOrDefault(selectedTable, selectedTable);
 
         StringBuilder sb = new StringBuilder();
-        sb.append("--------------- بون قسم الشيشة 💨 ---------------\n");
-        sb.append("طاولة      : ").append(selectedTable).append("\n");
-        sb.append("الجهة       : ").append(captainInfo).append("\n");
-        sb.append("وقت الدخول : ").append(timeIn).append("\n");
+        sb.append("--------------- بون قسم الشيشة 💨 (تحديث) ---------------\n");
+        sb.append("الزبون/الطاولة: ").append(customerNameStr).append("\n");
+        sb.append("الجهة        : ").append(captainInfo).append("\n");
+        sb.append("وقت الدخول  : ").append(timeIn).append("\n");
         sb.append("------------------------------------------------\n");
-        boolean hasItems = false;
 
-        for (String itemLine : orderList.getItems()) {
-            if (itemLine.contains("[shisha]")) {
-                String name = itemLine.split(" \\| ")[0].trim();
-                int qty = extractQuantity(itemLine);
-                sb.append(String.format("• %-25s  (عدد %d)\n", name, qty));
-                hasItems = true;
+        boolean hasItems = false;
+        List<TableOrderItem> items = activeTableOrders.get(selectedTable);
+
+        if (items != null) {
+            for (TableOrderItem item : items) {
+                String itemLine = item.rawLine;
+                if (itemLine.contains("[shisha]")) {
+                    int diffQty = item.getUnprintedQty(); // حساب الفرق فقط
+                    if (diffQty > 0) {
+                        String name = itemLine.split(" \\| ")[0].trim();
+                        sb.append(String.format("• %-25s  (عدد %d)\n", name, diffQty));
+                        hasItems = true;
+                    }
+                }
             }
         }
+
         if (!hasItems) {
-            sb.append("        (لا توجد أصناف شيشة)\n");
+            return null;
         }
+
         sb.append("------------------------------------------------\n");
         sb.append("ملاحظة : ").append(noteText).append("\n");
         sb.append("================================================\n");
@@ -916,16 +1266,8 @@ public class Hall {
 
     private void filterTables(String query) {
         tablesGrid.getChildren().clear();
-        for (int i = 1; i <= 200; i++) {
+        for (int i = 1; i <= 199; i++) {
             String tblName = String.valueOf(i);
-            if (i == 198) {
-                tblName = "198 سوق";
-            } else if (i == 199) {
-                tblName = "199 إدارة";
-            } else if (i == 200) {
-                tblName = "200 استاف";
-            }
-
             if (tblName.contains(query)) {
                 final String selectedTbl = tblName;
                 Button tBtn = new Button(selectedTbl);
@@ -1005,7 +1347,6 @@ public class Hall {
     }
 
     private void showPlaystationManagementView() {
-
         if (psTimer != null) {
             psTimer.stop();
         }
@@ -1035,7 +1376,6 @@ public class Hall {
             nameLbl.setStyle("-fx-font-weight: bold; -fx-font-size: 14px;");
 
             Label statusLbl = new Label();
-
             Label costLbl = new Label();
             costLbl.setStyle("-fx-font-weight: bold; -fx-font-size: 12px; -fx-text-fill: #b91c1c;");
 
@@ -1123,14 +1463,12 @@ public class Hall {
         });
     }
 
-       private void loadItemsToGrid(String category) {
+    private void loadItemsToGrid(String category) {
         itemsGrid.getChildren().clear();
-
-        // هيكل تخزين الاصناف: {الاسم, السعر}
         Object[][] itemsData = null;
 
         switch (category) {
-            case "hot_drinks": // قسم م / ساخنة (شاي، قهوة، سحلب، أعشاب)
+            case "hot_drinks":
                 itemsData = new Object[][]{
                     {"قهوة تركي", 17.0}, {"قهوة تركي _ دبل", 27.0}, {"قهوة محوج", 18.0}, {"قهوة محوج _ دبل", 27.0},
                     {"قهوة حليب", 25.0}, {"قهوة نكهات", 28.0}, {"كاكاو", 28.0}, {"كاكاو _ سيدر", 30.0},
@@ -1152,7 +1490,7 @@ public class Hall {
                 };
                 break;
 
-            case "juices": // قسم عصائر
+            case "juices":
                 itemsData = new Object[][]{
                     {"عصير مانجو", 35.0}, {"عصير موز", 30.0}, {"عصير فراولة", 30.0}, {"عصير جوافة", 30.0},
                     {"عصير كيوى", 50.0}, {"عصير برتقال", 35.0}, {"عصير بطيخ", 35.0}, {"عصير مشمش", 35.0},
@@ -1167,7 +1505,7 @@ public class Hall {
                 };
                 break;
 
-            case "soda": // قسم مشروبات غازيه
+            case "soda":
                 itemsData = new Object[][]{
                     {"بيبتي", 25.0}, {"سفن", 25.0}, {"فيروز", 27.0}, {"فيرندا برتقال", 25.0},
                     {"فيرندا تفاح", 25.0}, {"جولد اناناس", 25.0}, {"جولد رومان", 25.0}, {"ماونتن ديو", 25.0},
@@ -1179,8 +1517,8 @@ public class Hall {
                 };
                 break;
 
-            case "cocktail": 
-            case "cocktails": 
+            case "cocktail":
+            case "cocktails":
                 itemsData = new Object[][]{
                     {"بوريو", 35.0}, {"اوريو", 40.0}, {"هوهوز", 40.0}, {"توينكز", 40.0},
                     {"جيرسي", 40.0}, {"فرابيتشينو", 40.0}, {"ايس كوفي", 40.0}, {"كيوي اناناس", 50.0},
@@ -1195,7 +1533,7 @@ public class Hall {
                 };
                 break;
 
-            case "sweets": 
+            case "sweets":
                 itemsData = new Object[][]{
                     {"أم علي ايس كريم", 40.0}, {"وافل نوتيلا اوريو", 50.0}, {"فروت سلاط ايس كريم", 60.0},
                     {"قشطوطة زردة", 40.0}, {"ايس كريم 2 بولة", 25.0}, {"أم علي لوتس", 45.0},
@@ -1203,13 +1541,13 @@ public class Hall {
                 };
                 break;
 
-            case "munchies": 
+            case "munchies":
                 itemsData = new Object[][]{
                     {"اندومى فرن _ اوبشن / دبل", 35.0}
                 };
                 break;
 
-            case "ss": 
+            case "ss":
                 itemsData = new Object[][]{
                     {"شاي_باكت_س", 7.0}, {"قهوة _ س", 12.0}, {"زردة _ س", 9.0}, {"نسكافيه _ س", 20.0},
                     {"قهوة حليب _ سوق", 20.0}, {"زردة عربي _ س", 11.0}, {"قهوه محوج _ س", 14.0}, {"اضافه 5", 5.0},
@@ -1228,7 +1566,7 @@ public class Hall {
                 };
                 break;
 
-            case "shisha": 
+            case "shisha":
                 itemsData = new Object[][]{
                     {"شيشة قص", 10.0}, {"شيشة سلوم", 9.0}, {"شيشة سلوم العرب", 10.0}, {"شيشة فاخر", 40.0},
                     {"شيشة فاخر _ ايس", 45.0}, {"شيشة فاخر _ ميكس", 45.0}, {"شيشة فاخر _ ميكس _ ايس", 47.0},
@@ -1249,14 +1587,120 @@ public class Hall {
                 itemBtn.setPrefSize(120, 50);
                 itemBtn.setStyle("-fx-background-color: #ffffff; -fx-border-color: #cccccc; -fx-font-weight: bold; -fx-font-size: 11px; -fx-text-alignment: center;");
 
-                
                 String itemType = category.equals("shisha") ? "shisha" : "kitchen";
-                itemBtn.setOnAction(e -> addItemToOrder(name, price, 1, itemType));
+
+                itemBtn.setOnAction(e -> {
+
+                    if (shouldShowComments(name)) {
+                        openItemCommentDialog(name, price, itemType);
+                    } else {
+                        addItemToOrder(name, price, 1, itemType);
+                    }
+                });
 
                 itemsGrid.getChildren().add(itemBtn);
             }
         }
     }
+
+    private boolean shouldShowComments(String itemName) {
+        return itemName.contains("قهوة") || itemName.contains("قهوه")
+                || itemName.contains("شاي") || itemName.contains("نسكافية")
+                || itemName.contains("نسكافيه") || itemName.contains("زردة")
+                || itemName.contains("سحلب") || itemName.contains("اندومى")
+                || itemName.contains("شيشة") || itemName.contains("شيشه")
+                || itemName.contains("قص") || itemName.contains("سلوم")
+                || itemName.contains("فاخر") || itemName.contains("مغربي");
+    }
+
+    private void openItemCommentDialog(String name, double price, String itemType) {
+        Stage dialog = new Stage();
+
+        dialog.initModality(Modality.APPLICATION_MODAL);
+        if (stage != null) {
+            dialog.initOwner(stage);
+        }
+
+        dialog.setTitle("خيارات: " + name);
+
+        VBox layout = new VBox(12);
+        layout.setPadding(new Insets(15));
+        layout.setAlignment(Pos.CENTER);
+        layout.setStyle("-fx-background-color: #ffffff;");
+
+        Label title = new Label("اختر طريقة التحضير لـ (" + name + "):");
+        title.setStyle("-fx-font-size: 14px; -fx-font-weight: bold; -fx-text-fill: #333;");
+
+        TilePane commentsGrid = new TilePane();
+        commentsGrid.setHgap(8);
+        commentsGrid.setVgap(8);
+        commentsGrid.setAlignment(Pos.CENTER);
+        commentsGrid.setPrefColumns(3);
+
+        List<String> options = new ArrayList<>();
+
+        if (itemType.equals("shisha") || name.contains("شيشة") || name.contains("شيشه") || name.contains("سلوم") || name.contains("قص") || name.contains("فاخر")) {
+            options.addAll(Arrays.asList("لي طبي", "لي زجاج", "حجر زياده", "حجر خفيف", "حجر تقيل", "ثلج", "بدون ثلج", "ايس"));
+        } else if (name.contains("قهو") || name.contains("قهوة")) {
+            options.addAll(Arrays.asList("مانو", "سكتو", "زيادة", "مظبوط", "على الريحة", "دوبل", "فرنساوي", "سادة"));
+        } else if (name.contains("شاي") || name.contains("زردة")) {
+            options.addAll(Arrays.asList("كشري", "فتلة", "ثقيل", "خفيف", "مظبوط", "مياه بيضاء", "نعناع", "بدون سكر"));
+        } else {
+            options.addAll(Arrays.asList("زيادة", "مظبوط", "خفيف", "بدون سكر", "دوبل"));
+        }
+
+        for (String opt : options) {
+            Button optBtn = new Button(opt);
+            optBtn.setPrefSize(90, 35);
+            optBtn.setStyle("-fx-background-color: #e0e0e0; -fx-font-weight: bold; -fx-font-size: 11px;");
+            optBtn.setOnAction(e -> {
+                addItemToOrder(name + " (" + opt + ")", price, 1, itemType);
+                dialog.close();
+            });
+            commentsGrid.getChildren().add(optBtn);
+        }
+
+        Button normalBtn = new Button("عادي (بدون كومنت)");
+        normalBtn.setPrefSize(180, 35);
+        normalBtn.setStyle("-fx-background-color: #777; -fx-text-fill: white; -fx-font-weight: bold;");
+        normalBtn.setOnAction(e -> {
+            addItemToOrder(name, price, 1, itemType);
+            dialog.close();
+        });
+
+        HBox customBox = new HBox(8);
+        customBox.setAlignment(Pos.CENTER);
+        TextField customInput = new TextField();
+        customInput.setPromptText("أو اكتب ملاحظة خاصة...");
+        customInput.setPrefWidth(180);
+
+        Button addCustomBtn = new Button("إضافة الملاحظة");
+        addCustomBtn.setStyle("-fx-background-color: #2e7d32; -fx-text-fill: white; -fx-font-weight: bold;");
+
+        Runnable saveAction = () -> {
+            String txt = customInput.getText().trim();
+            if (!txt.isEmpty()) {
+                addItemToOrder(name + " (" + txt + ")", price, 1, itemType);
+            } else {
+                addItemToOrder(name, price, 1, itemType);
+            }
+            dialog.close();
+        };
+
+        addCustomBtn.setOnAction(e -> saveAction.run());
+        customInput.setOnAction(e -> saveAction.run());
+
+        customBox.getChildren().addAll(customInput, addCustomBtn);
+
+        layout.getChildren().addAll(title, commentsGrid, normalBtn, new Separator(), customBox);
+        Scene scene = new Scene(layout, 340, 340);
+
+        dialog.setOnShown(e -> customInput.requestFocus());
+
+        dialog.setScene(scene);
+        dialog.showAndWait();
+    }
+
     private void addItemToOrder(String name, double price, int qty, String category) {
         if (!tableEntryTimes.containsKey(selectedTable)) {
             tableEntryTimes.put(selectedTable, LocalDateTime.now().format(DateTimeFormatter.ofPattern("hh:mm a")));
@@ -1266,11 +1710,58 @@ public class Hall {
                 : category.equals("playstation") ? "[playstation]"
                 : category.equals("service") ? "[service]" : "[kitchen]";
 
-        String line = String.format("%-20s | %d | %.2f [%s]", name, qty, price * qty, typeTag);
-        orderList.getItems().add(line);
+        boolean found = false;
+        for (int i = 0; i < orderList.getItems().size(); i++) {
+            String itemLine = orderList.getItems().get(i);
+            try {
+                String[] mainParts = itemLine.split(" \\[");
+                String dataPart = mainParts[0];
+                String tagPart = "[" + mainParts[1];
+                String[] parts = dataPart.split(" \\| ");
+                String existingName = parts[0].trim();
+
+                if (existingName.equals(name) && tagPart.equals(typeTag)) {
+                    int existingQty = Integer.parseInt(parts[1].trim());
+                    int newQty = existingQty + qty;
+                    double existingTotalPrice = Double.parseDouble(parts[2].trim());
+                    double unitPrice = existingTotalPrice / existingQty;
+                    double newTotalPrice = unitPrice * newQty;
+
+                    String newLine = String.format("%-20s | %d | %.2f %s", name, newQty, newTotalPrice, typeTag);
+                    orderList.getItems().set(i, newLine);
+                    found = true;
+                    break;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
+        if (!found) {
+            String line = String.format("%-20s | %d | %.2f %s", name, qty, price * qty, typeTag);
+            orderList.getItems().add(line);
+        }
+
+        // =========================================================
+        // 👇 التعديل هنا بدلاً من المسح الكامل وإعادة الإضافة 👇
+        // =========================================================
+        // 1. جلب قائمة العناصر الحالية الخاصة بالطاولة (أو إنشاؤها إذا لم تكن موجودة)
+        List<TableOrderItem> currentList = activeTableOrders.computeIfAbsent(selectedTable, k -> new ArrayList<>());
+
+        // 2. تحديث/إضافة العناصر مع الحفاظ على حالة الإرسال للمطبخ (sentToKitchen)
+        for (int i = 0; i < orderList.getItems().size(); i++) {
+            String line = orderList.getItems().get(i);
+
+            if (i < currentList.size()) {
+                // إذا كان الصنف موجوداً سابقاً، نكتفي بتحديث نصه ونحتفظ بحالته كما هي (سواء true أو false)
+                currentList.get(i).rawLine = line;
+            } else {
+                // إذا كان صنفاً جديداً تمت إضافته الآن، نضيفه بحالة لم يُرسل للمطبخ بعد (false)
+                currentList.add(new TableOrderItem(line, false));
+            }
+        }
+
         calculateTotal();
-        tableStates.put(selectedTable, 1);
-        updateTablesStats();
+        syncTableToDatabase(selectedTable);
     }
 
     private void modifyQuantity(int change) {
@@ -1292,15 +1783,16 @@ public class Hall {
             } else {
                 orderList.getItems().remove(selectedIndex);
             }
-            calculateTotal();
-        }
-    }
 
-    private void deleteSelectedOrderItem() {
-        int selectedIndex = orderList.getSelectionModel().getSelectedIndex();
-        if (selectedIndex >= 0) {
-            orderList.getItems().remove(selectedIndex);
+            List<TableOrderItem> updatedList = new ArrayList<>();
+            for (String line : orderList.getItems()) {
+                updatedList.add(new TableOrderItem(line));
+            }
+            activeTableOrders.put(selectedTable, updatedList);
+
             calculateTotal();
+
+            syncTableToDatabase(selectedTable);
         }
     }
 
@@ -1317,40 +1809,65 @@ public class Hall {
         totalLabel.setText(String.format("الإجمالي: %.2f جنيه", total));
     }
 
-    private void saveCurrentOrderToTable() {
-        List<TableOrderItem> items = new ArrayList<>();
-        for (String itemLine : orderList.getItems()) {
-            items.add(new TableOrderItem(itemLine));
-        }
-        activeTableOrders.put(selectedTable, items);
-        tableStates.put(selectedTable, items.isEmpty() ? 0 : 1);
-        updateTablesStats();
-    }
-
     private void loadTableOrderToScreen(String tableName) {
         orderList.getItems().clear();
         List<TableOrderItem> savedItems = activeTableOrders.getOrDefault(tableName, new ArrayList<>());
+        if (savedItems.isEmpty() && persistentAglOrders.containsKey(tableName)) {
+            savedItems = persistentAglOrders.get(tableName);
+            activeTableOrders.put(tableName, savedItems);
+        }
         for (TableOrderItem item : savedItems) {
             orderList.getItems().add(item.rawLine);
         }
-        tableNoteDisplayLabel.setText("ملاحظة الطاولة: " + tableNotes.getOrDefault(tableName, "لا يوجد"));
+        String custInfo = specialTableCustomerNames.containsKey(tableName) ? " | الزبون: " + specialTableCustomerNames.get(tableName) : "";
+        tableNoteDisplayLabel.setText("ملاحظة الطاولة: " + tableNotes.getOrDefault(tableName, "لا يوجد") + custInfo);
         calculateTotal();
     }
 
     private void clearCurrentScreenOrder() {
         orderList.getItems().clear();
         activeTableOrders.remove(selectedTable);
+        persistentAglOrders.remove(selectedTable);
         tableNotes.remove(selectedTable);
         tableEntryTimes.remove(selectedTable);
+        specialTableCustomerNames.remove(selectedTable);
         tableStates.put(selectedTable, 0);
         calculateTotal();
         updateTablesStats();
     }
 
     private void confirmOrderToKitchenAndShishaWithoutClientPrint() {
-        saveCurrentOrderToTable();
-        Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم إرسال الأوردر للمطبخ والشيشة بنجاح!", ButtonType.OK);
+        List<TableOrderItem> items = activeTableOrders.get(selectedTable);
+
+        // 1. توليد بون المطبخ والشيشة للجديد فقط
+        String kitchenTicket = generateFullKitchenTicketText();
+        String shishaTicket = generateFullShishaTicketText();
+
+        if (kitchenTicket == null && shishaTicket == null) {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "لا توجد أطباق أو أصناف جديدة للإرسال للمطبخ/الشيشة.", ButtonType.OK);
+            alert.showAndWait();
+            return;
+        }
+
+        // 2. كود الطباعة المباشرة الخاص بك للطابعة يُوضع هنا (مثل printTextToPrinter(kitchenTicket) .. إلخ)
+        // 3. تحديث الـ sentQty لكل العناصر ليصبح المساوئ للكمية الحالية
+        if (items != null) {
+            for (TableOrderItem item : items) {
+                int currentTotalQty = TableOrderItem.extractQtyFromLine(item.rawLine);
+                item.sentQty = currentTotalQty; // تحديث المرسل
+                item.sentToKitchen = true;
+            }
+        }
+
+        Alert alert = new Alert(Alert.AlertType.INFORMATION, "تم إرسال التحديثات للمطبخ والشيشة بنجاح!", ButtonType.OK);
         alert.showAndWait();
+
+        tableStates.put(selectedTable, 2);
+
+        syncTableToDatabase(selectedTable);
+        populateTables(1, 199);
+        syncTableToDatabase(selectedTable);
+        loadTableOrderToScreen(selectedTable); // إعادة تحميل القائمة لتحديث العرض
     }
 
     private void sendTextToPrinter(String text) {
@@ -1366,9 +1883,7 @@ public class Hall {
             boolean proceed = job.showPrintDialog(stage);
 
             if (proceed) {
-
                 VBox receiptNode = createReceiptNodeForPrinting(text);
-
                 boolean success = job.printPage(receiptNode);
                 if (success) {
                     job.endJob();
@@ -1407,7 +1922,7 @@ public class Hall {
 
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.setTitle("إتمام المحاسبة والدفع");
-        dialog.setHeaderText("طاولة " + selectedTable + " | المبلغ المطلوب: " + String.format("%.2f", total) + " ج");
+        dialog.setHeaderText("طاولة/قسم " + selectedTable + " | المبلغ المطلوب: " + String.format("%.2f", total) + " ج");
 
         ButtonType payOnlyBtn = new ButtonType("دفع فقط (بدون طباعة) 💳", ButtonBar.ButtonData.LEFT);
         ButtonType payAndPrintBtn = new ButtonType("دفع وطباعة الشيك 💳🖨️", ButtonBar.ButtonData.RIGHT);
@@ -1426,7 +1941,6 @@ public class Hall {
 
     private void processFinalCheckout(boolean shouldPrint) {
         if (shouldPrint) {
-
             sendTextToPrinter(generateFullCustomerReceiptText(orderCounter));
         }
 
@@ -1452,14 +1966,16 @@ public class Hall {
 
         tableStates.put(selectedTable, 0);
         activeTableOrders.remove(selectedTable);
+        persistentAglOrders.remove(selectedTable);
         tableNotes.remove(selectedTable);
         tableEntryTimes.remove(selectedTable);
+        specialTableCustomerNames.remove(selectedTable);
 
         clearCurrentScreenOrder();
         updateTablesStats();
         updateHeaderStats();
 
-        Alert success = new Alert(Alert.AlertType.INFORMATION, "تم الدفع وتصفية الطاولة بنجاح!", ButtonType.OK);
+        Alert success = new Alert(Alert.AlertType.INFORMATION, "تم الدفع وتصفية الحساب بنجاح!", ButtonType.OK);
         success.showAndWait();
     }
 
@@ -1521,9 +2037,38 @@ public class Hall {
     private static class TableOrderItem {
 
         String rawLine;
+        boolean sentToKitchen;
+        int sentQty;
+
+        TableOrderItem(String rawLine, boolean sentToKitchen, int sentQty) {
+            this.rawLine = rawLine;
+            this.sentToKitchen = sentToKitchen;
+            this.sentQty = sentQty;
+        }
+
+        TableOrderItem(String rawLine, boolean sentToKitchen) {
+            this(rawLine, sentToKitchen, sentToKitchen ? extractQtyFromLine(rawLine) : 0);
+        }
 
         TableOrderItem(String rawLine) {
-            this.rawLine = rawLine;
+            this(rawLine, false, 0);
+        }
+
+        // دالة لحساب الفرق الجديد (الكمية التي لم تُطبع بعد)
+        public int getUnprintedQty() {
+            int currentTotalQty = extractQtyFromLine(this.rawLine);
+            return Math.max(0, currentTotalQty - this.sentQty);
+        }
+
+        private static int extractQtyFromLine(String line) {
+            try {
+                if (line != null && line.contains("x ")) {
+                    String[] parts = line.split("x ", 2);
+                    return Integer.parseInt(parts[0].trim());
+                }
+            } catch (Exception ignored) {
+            }
+            return 1;
         }
     }
 
