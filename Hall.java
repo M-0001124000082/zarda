@@ -80,7 +80,9 @@ public class Hall {
     private static final Map<String, List<String>> itemCommentsMap = new HashMap<>();
     private static final Map<String, Integer> kitchenShishaItemCounts = new HashMap<>();
     private static final Map<Integer, PlaystationDevice> psDevices = new HashMap<>();
+    private static final Map<String, String> pendingCancellationOTPs = new HashMap<>();
 
+    private static final Map<String, Integer> pendingCancellationQuantities = new HashMap<>();
     private Label totalLabel;
     private ListView<String> orderList;
     private Label currentTableLabel;
@@ -90,7 +92,6 @@ public class Hall {
     private Label tableNoteDisplayLabel;
     private Label captainLabel;
     private String selectedTable = "1";
-
     private TilePane tablesGrid;
     private TilePane itemsGrid;
     private VBox subCategoriesBox;
@@ -166,22 +167,34 @@ public class Hall {
     }
 
     private String getCaptainForTable(String tbl) {
+        if (tbl == null || tbl.isEmpty()) {
+            return "غير محدد";
+        }
+
+        // الأقسام الخاصة والنظام
         if (tbl.contains("إدارة") || tbl.contains("سوق") || tbl.contains("استاف") || tbl.contains("خصوص")) {
             return "إدارة وخاصة بالسيستم";
         }
         if (tbl.startsWith("PS")) {
             return "قسم البلايستيشن";
         }
+
         try {
             int tNum = Integer.parseInt(tbl);
-            if (tNum <= 99) {
-                return "كابتن صالة جوه: ك/ أحمد متولي";
-            } else {
-                return "كابتن صالة بره: ك/ إسلام محمد";
+
+            // البحث في قائمة الموظفين المعتمدة في ShiftManager
+            for (ShiftManager.Employee emp : ShiftManager.employees) {
+                if ("كابتن".equals(emp.role)) {
+                    if (tNum >= emp.tableStart && tNum <= emp.tableEnd) {
+                        return "كابتن صالة " + emp.location + ": ك/ " + emp.name;
+                    }
+                }
             }
-        } catch (Exception e) {
-            return "كابتن صالة عام: أحمد متولي";
+        } catch (NumberFormatException e) {
+            return "كابتن صالة عام";
         }
+
+        return "لا يوجد كابتن مخصص للنطاق";
     }
 
     private void initPlaystationDevices() {
@@ -859,82 +872,167 @@ public class Hall {
         });
     }
 
-   private String sendEmailOTP(String recipientEmail) {
-    int randomCode = 1000 + new Random().nextInt(9000);
-    String otpCode = String.valueOf(randomCode);
+    private String sendEmailOTP(String recipientEmail, String tableName, String itemName, int cancelQty, int currentQty) {
+        int randomCode = 1000 + new Random().nextInt(9000);
+        String otpCode = String.valueOf(randomCode);
 
-    final String senderEmail = "mh8302313@gmail.com";
-    // إزالة المسافات من كلمة المرور لضمان القبول
-    final String appPassword = "ofvpemmibkctwrxa";
+        final String senderEmail = "mh8302313@gmail.com";
+        final String appPassword = "ofvpemmibkctwrxa";
 
-    new Thread(() -> {
-        try {
-            Properties props = new Properties();
-            props.put("mail.smtp.auth", "true");
-            props.put("mail.smtp.starttls.enable", "true");
-            props.put("mail.smtp.host", "smtp.gmail.com");
-            props.put("mail.smtp.port", "587");
-            props.put("mail.smtp.ssl.protocols", "TLSv1.2");
-            props.put("mail.smtp.ssl.trust", "smtp.gmail.com");
+        new Thread(() -> {
+            try {
+                Properties props = new Properties();
+                props.put("mail.smtp.auth", "true");
+                props.put("mail.smtp.starttls.enable", "true");
+                props.put("mail.smtp.host", "smtp.gmail.com");
+                props.put("mail.smtp.port", "587");
+                props.put("mail.smtp.ssl.protocols", "TLSv1.2");
+                props.put("mail.smtp.ssl.trust", "smtp.gmail.com");
 
-            Session session = Session.getInstance(props, new Authenticator() {
-                @Override
-                protected PasswordAuthentication getPasswordAuthentication() {
-                    return new PasswordAuthentication(senderEmail, appPassword);
-                }
-            });
+                Session session = Session.getInstance(props, new Authenticator() {
+                    @Override
+                    protected PasswordAuthentication getPasswordAuthentication() {
+                        return new PasswordAuthentication(senderEmail, appPassword);
+                    }
+                });
 
-            Message message = new MimeMessage(session);
-            message.setFrom(new InternetAddress(senderEmail, "Zarda CAFE System"));
-            message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(recipientEmail));
-            message.setSubject("رمز إلغاء طلب - ZCAFE");
-            message.setText("كود التأكيد لإلغاء الصنف بعد إرساله للمطبخ هو: " + otpCode);
+                Message message = new MimeMessage(session);
+                message.setFrom(new InternetAddress(senderEmail, "Zarda CAFE System"));
+                message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(recipientEmail));
 
-            Transport.send(message);
-            System.out.println("تم إرسال كود التأكيد بنجاح إلى: " + recipientEmail);
+                message.setSubject("طلب إلغاء (" + cancelQty + ") من " + itemName + " - طاولة: " + tableName);
 
-        } catch (Exception e) {
-            System.err.println("فشل إرسال الإيميل: " + e.getMessage());
-            e.printStackTrace();
+                String emailText = "طلب إلغاء كمية من صنف بعد إرساله للمطبخ:\n\n"
+                        + "📍 رقم الطاولة: " + tableName + "\n"
+                        + "☕ اسم الصنف: " + itemName + "\n"
+                        + "🔢 الكمية الأصلية: " + currentQty + "\n"
+                        + "❌ الكمية المراد إلغاؤها: " + cancelQty + "\n"
+                        + "Remaining المتبقي بعد الإلغاء: " + (currentQty - cancelQty) + "\n\n"
+                        + "🔐 كود التأكيد للإلغاء هو: " + otpCode;
+
+                message.setText(emailText);
+
+                Transport.send(message);
+                System.out.println("تم إرسال كود التأكيد بنجاح إلى: " + recipientEmail);
+
+            } catch (Exception e) {
+                System.err.println("فشل إرسال الإيميل: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }).start();
+
+        return otpCode;
+    }
+
+    private void handleDoubleClickRemove() {
+        int selectedIndex = orderList.getSelectionModel().getSelectedIndex();
+        if (selectedIndex < 0) {
+            return;
         }
-    }).start();
 
-    return otpCode;
-}
+        List<TableOrderItem> items = activeTableOrders.get(selectedTable);
+        if (items == null || selectedIndex >= items.size()) {
+            return;
+        }
 
-// ========================================================
-// 2. ميثود الحذف والإلغاء مع ضبط توافقية JavaFX Thread
-// ========================================================
-private void handleDoubleClickRemove() {
-    int selectedIndex = orderList.getSelectionModel().getSelectedIndex();
-    if (selectedIndex < 0) {
-        return;
-    }
+        TableOrderItem itemToModify = items.get(selectedIndex);
 
-    List<TableOrderItem> items = activeTableOrders.get(selectedTable);
-    if (items == null || selectedIndex >= items.size()) {
-        return;
-    }
+        // 1. قبل المطبخ: حذف مباشر وفوري
+        if (!itemToModify.sentToKitchen) {
+            items.remove(selectedIndex);
+            syncTableToDatabase(selectedTable);
+            loadTableOrderToScreen(selectedTable);
+            return;
+        }
 
-    TableOrderItem itemToModify = items.get(selectedIndex);
+        // 2. استخراج البيانات الحالية بأمان
+        final String tableName = (selectedTable != null) ? selectedTable : "غير محددة";
+        String raw = itemToModify.rawLine != null ? itemToModify.rawLine : "";
 
-    // إذا كان الطلب قد أُرسل للمطبخ يتم توليد كود وإرساله للبريد
-    if (itemToModify.sentToKitchen) {
+        // استخراج اسم الصنف صافي من الجزء الأول
+        String[] initialParts = raw.split("\\|");
+        String itemName = initialParts[0].replaceAll("\\[.*?\\]", "").trim();
+        if (itemName.isEmpty()) {
+            itemName = "صنف محدد";
+        }
+
+        // استخراج الكمية والسعر الحاليين
+        int totalQty = TableOrderItem.extractQtyFromLine(raw);
+        if (totalQty <= 0) {
+            totalQty = 1;
+        }
+
+        double currentPrice = 0.0;
+        if (initialParts.length > 0) {
+            try {
+                // السعر موجود في الجزء الأخير
+                String lastPart = initialParts[initialParts.length - 1].replaceAll("[^0-9.]", "").trim();
+                currentPrice = Double.parseDouble(lastPart);
+            } catch (Exception ignored) {
+            }
+        }
+
+        int qtyToRemove = totalQty;
         String targetEmail = "cyber1system@gmail.com";
+        String pendingKey = tableName + "_" + itemName + "_" + selectedIndex;
+        String otpToVerify;
 
-        // إرسال الكود للبريد الشخصي المستلم
-        String generatedOTP = sendEmailOTP(targetEmail);
+        // إدارة كود التحقق والكميات المعلقة
+        if (pendingCancellationOTPs.containsKey(pendingKey)) {
+            otpToVerify = pendingCancellationOTPs.get(pendingKey);
+            qtyToRemove = pendingCancellationQuantities.getOrDefault(pendingKey, totalQty);
+        } else {
+            if (totalQty > 1) {
+                TextInputDialog qtyDialog = new TextInputDialog("1");
+                qtyDialog.setTitle("تحديد الكمية المراد إلغاؤها");
+                qtyDialog.setHeaderText("الصنف: " + itemName + " (العدد بالمطبخ: " + totalQty + ")\nأدخل الكمية المراد إلغاؤها:");
+                qtyDialog.setContentText("الكمية (1 إلى " + totalQty + "):");
+
+                var qtyResult = qtyDialog.showAndWait();
+                if (qtyResult.isPresent()) {
+                    try {
+                        int inputQty = Integer.parseInt(qtyResult.get().trim());
+                        if (inputQty <= 0 || inputQty > totalQty) {
+                            Alert alert = new Alert(Alert.AlertType.ERROR, "الكمية المدخلة غير صحيحة!", ButtonType.OK);
+                            alert.showAndWait();
+                            return;
+                        }
+                        qtyToRemove = inputQty;
+                    } catch (NumberFormatException e) {
+                        Alert alert = new Alert(Alert.AlertType.ERROR, "يرجى كتابة رقم صحيح!", ButtonType.OK);
+                        alert.showAndWait();
+                        return;
+                    }
+                } else {
+                    return;
+                }
+            }
+
+            otpToVerify = sendEmailOTP(targetEmail, tableName, itemName, qtyToRemove, totalQty);
+            pendingCancellationOTPs.put(pendingKey, otpToVerify);
+            pendingCancellationQuantities.put(pendingKey, qtyToRemove);
+
+            Alert noticeAlert = new Alert(Alert.AlertType.INFORMATION,
+                    "تم إرسال طلب إلغاء عدد (" + qtyToRemove + ") من " + itemName + " للمدير.\nاضغط موافق لإدخال الكود المستلم.",
+                    ButtonType.OK);
+            noticeAlert.setTitle("طلب إلغاء كمية");
+            noticeAlert.setHeaderText("طاولة: " + tableName + " | الصنف: " + itemName);
+            noticeAlert.showAndWait();
+        }
 
         TextInputDialog passDialog = new TextInputDialog();
         passDialog.setTitle("تأكيد الإلغاء (Email OTP)");
-        passDialog.setHeaderText("هذا الطلب تم إرساله للمطبخ بالفعل!\nجاري إرسال كود التأكيد إلى إيميلك: " + targetEmail);
-        passDialog.setContentText("أدخل كود التحقق المكون من 4 أرقام:");
+        passDialog.setHeaderText("إلغاء عدد (" + qtyToRemove + ") من صنف: " + itemName + "\nطاولة: " + tableName + "\nأدخل كود التأكيد المرسل للمدير:");
+        passDialog.setContentText("أدخل كود التحقق (4 أرقام):");
 
         var result = passDialog.showAndWait();
         if (result.isPresent()) {
             String enteredPass = result.get().trim();
 
-            if (!generatedOTP.equals(enteredPass)) {
+            if (otpToVerify.equals(enteredPass)) {
+                pendingCancellationOTPs.remove(pendingKey);
+                pendingCancellationQuantities.remove(pendingKey);
+            } else {
                 Alert alert = new Alert(Alert.AlertType.ERROR, "كود التحقق غير صحيح! لا يمكن إلغاء الطلب.", ButtonType.OK);
                 alert.showAndWait();
                 return;
@@ -942,14 +1040,24 @@ private void handleDoubleClickRemove() {
         } else {
             return;
         }
+
+        // 3. التعديل الفعلي بالتنسيق الأصلي الصحيح للنظام (اسم الصنف مع التاج | الكمية | السعر)
+        if (qtyToRemove >= totalQty) {
+            items.remove(selectedIndex);
+        } else {
+            int remainingQty = totalQty - qtyToRemove;
+            double singleUnitPrice = (totalQty > 0) ? (currentPrice / totalQty) : 0.0;
+            double newTotalPrice = singleUnitPrice * remainingQty;
+
+            // تركيب النص مع إضافة محددات RTL بين الفواصل لمنع العكس
+            itemToModify.rawLine = String.format("\u200F%s [kitchen] \u200F|\u200F %d \u200F|\u200F %.2f", itemName, remainingQty, newTotalPrice);
+            itemToModify.sentQty = remainingQty;
+        }
+
+        syncTableToDatabase(selectedTable);
+        loadTableOrderToScreen(selectedTable);
     }
 
-    // الحذف المباشر (للطبات قبل المطبخ أو بعد إدخال الكود الصحيح)
-    items.remove(selectedIndex);
-    syncTableToDatabase(selectedTable);
-    loadTableOrderToScreen(selectedTable);
-}
-    // نافذة اختيار الفواتير والأقسام الجديدة للـ معاينة والطباعة (سوق، إدارة، صالة جوه 1-99، صالة بره 99-199، آجل، استاف)
     private void showInvoicesSelectionDialog() {
         Stage invStage = new Stage();
         invStage.setTitle("إدارة فواتير ومعاينة الأقسام والترابيزات من الشفت");
@@ -1670,6 +1778,9 @@ private void handleDoubleClickRemove() {
         sb.append("ملاحظات الأوردر    : ").append(noteText).append("\n");
         sb.append("================================================\n");
         sb.append("            شكراً لزيارتكم كافيه زردة            \n");
+        // إضافة السطر في نص الفاتورة قبل قائمة الطلبات
+        sb.append("الكابتن المسؤول: ").append(getCaptainForTable(selectedTable)).append("\n");
+        sb.append("----------------------------------------\n");
         return sb.toString();
     }
 
@@ -2220,36 +2331,33 @@ private void handleDoubleClickRemove() {
     }
 
     private void loadTableOrderToScreen(String tableName) {
-        // 1. تحديث اسم الطاولة المختارة
-        this.selectedTable = tableName;
-        if (currentTableLabel != null) {
-            currentTableLabel.setText("الطاولة: " + selectedTable);
-        }
-
-        // 2. تحديث اسم الكابتن المسند للطاولة الحالية في الهيدر
-        if (captainLabel != null) {
-            captainLabel.setText(getCaptainForTable(selectedTable));
-        }
-
-        // 3. تفريغ القائمة وإعادة تحميل أصناف الطاولة
         orderList.getItems().clear();
-        List<TableOrderItem> savedItems = activeTableOrders.getOrDefault(tableName, new ArrayList<>());
-        if (savedItems.isEmpty() && persistentAglOrders.containsKey(tableName)) {
-            savedItems = persistentAglOrders.get(tableName);
-            activeTableOrders.put(tableName, savedItems);
-        }
-        for (TableOrderItem item : savedItems) {
-            orderList.getItems().add(item.rawLine);
+        double currentTableTotal = 0.0;
+        captainLabel.setText(getCaptainForTable(selectedTable));
+        List<TableOrderItem> items = activeTableOrders.get(tableName);
+        if (items != null) {
+            for (TableOrderItem item : items) {
+                orderList.getItems().add(item.rawLine);
+
+                // استخراج السعر الحقيقي بأمان من أي جزء يحتوي على أرقام وسعر
+                if (item.rawLine != null && !item.rawLine.isEmpty()) {
+                    String[] parts = item.rawLine.split("\\|");
+                    if (parts.length > 0) {
+                        try {
+                            // أخذ الجزء الأخير دائماً المخصص للسعر
+                            String priceStr = parts[parts.length - 1].replaceAll("[^0-9.]", "").trim();
+                            if (!priceStr.isEmpty()) {
+                                currentTableTotal += Double.parseDouble(priceStr);
+                            }
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            }
         }
 
-        // 4. عرض ملاحظات الطاولة واسم الزبون إن وجد
-        String custInfo = specialTableCustomerNames.containsKey(tableName) ? " | الزبون: " + specialTableCustomerNames.get(tableName) : "";
-        if (tableNoteDisplayLabel != null) {
-            tableNoteDisplayLabel.setText("ملاحظة الطاولة: " + tableNotes.getOrDefault(tableName, "لا يوجد") + custInfo);
-        }
-
-        // 5. إعادة حساب الإجمالي
-        calculateTotal();
+        // تحديث نص الإجمالي في الواجهة
+        totalLabel.setText(String.format("الإجمالي: %.2f جنيه", currentTableTotal));
     }
 
     private void clearCurrentScreenOrder() {
